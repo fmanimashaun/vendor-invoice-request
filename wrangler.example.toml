@@ -1,0 +1,51 @@
+# Copy to wrangler.toml and fill in your own ids. wrangler.toml is gitignored:
+# resource ids, your Access team domain and your AUD tag are deployment
+# configuration and must never land in the repository.
+#
+#   cp wrangler.example.toml wrangler.toml
+#   npx wrangler d1 create vendor-invoice-request      # paste the id below
+#   npx wrangler kv namespace create ASSETS_KV         # paste the id below
+#   npx wrangler secret put SESSION_SECRET
+
+name = "vendor-invoice-request"
+main = "worker/worker.js"
+compatibility_date = "2026-01-15"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vendor-invoice-request"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# Letterhead artwork per vendor (<vendor-code>/header.png ...) + shared fonts.
+[[kv_namespaces]]
+binding = "ASSETS_KV"
+id = "REPLACE_WITH_YOUR_KV_ID"
+
+[vars]
+# Cloudflare Access — required for client-side SSO. Without both of these the
+# Worker skips the Access path entirely and only password login works, which is
+# correct locally and wrong in production.
+# ACCESS_TEAM_DOMAIN = "yourteam.cloudflareaccess.com"
+# ACCESS_AUD = "the-access-application-aud-tag"
+
+# Sign-in methods. Both default to on; SSO additionally requires the two
+# ACCESS_* values above, so it is never advertised when it cannot work.
+# Turning both off is refused at runtime rather than locking everyone out.
+#
+# Which identity provider SSO uses is NOT set here. Attach exactly one IdP to
+# the Access application to skip Cloudflare's provider chooser, or attach both
+# to keep it.
+# AUTH_SSO_ENABLED = "false"
+# AUTH_PASSWORD_ENABLED = "false"
+# SSO_BUTTON_LABEL = "Sign in with Microsoft"
+
+# Optional, defence in depth: only these email domains may be auto-provisioned
+# on first SSO sign-in, even if the Access policy is later widened.
+# SSO_ALLOWED_DOMAINS = "yourcompany.com"
+
+# Secret, set with: npx wrangler secret put SESSION_SECRET
+# SESSION_SECRET

@@ -1,0 +1,35 @@
+{
+  "name": "vendor-invoice-request",
+  "private": true,
+  "license": "MIT",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Multi-vendor invoice request workflow: staff raise payment requests, onboarded vendors approve from a shared queue and issue a numbered PDF on their own letterhead.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "db:local": "wrangler d1 execute vendor-invoice-request --local --file=migrations/0001_init.sql",
+    "db:remote": "wrangler d1 execute vendor-invoice-request --remote --file=migrations/0001_init.sql",
+    "seed": "wrangler d1 execute vendor-invoice-request --local --file=scripts/seed.local.sql",
+    "assets:upload": "bash scripts/upload-assets.sh",
+    "test": "node scripts/test-e2e.mjs"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "pdf-lib": "^1.17.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.45.1",
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.10",
+    "wrangler": "^4.112.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260828.1": true
+  }
+}

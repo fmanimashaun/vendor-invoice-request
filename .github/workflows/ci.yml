@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # wrangler.toml and the seed are per-deployment and gitignored, so CI
+      # materialises the committed examples.
+      - run: cp wrangler.example.toml wrangler.toml
+
+      # The renderer needs a font with the Naira glyph U+20A6. Arimo is not in
+      # the runner image and is not committed, so CI substitutes DejaVu Sans,
+      # which also has the glyph. Production uses Arimo — see assets/README.md.
+      - name: Provide test fonts and placeholder artwork
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-dejavu-core python3-pip
+          pip install --quiet pillow
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf      assets/Arimo-Regular.ttf
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf assets/Arimo-Bold.ttf
+          python - <<'PY'
+          from PIL import Image
+          for name, size in [('header',(1121,610)), ('footer',(1122,648)), ('logo',(768,255)),
+                             ('tagline_services',(1834,49)), ('tagline_slogan',(843,60))]:
+              Image.new('RGBA', size, (255,255,255,0)).save(f'assets/{name}.png')
+          PY
+
+      - run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: cp wrangler.example.toml wrangler.toml
+      - run: npm run build
