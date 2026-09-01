@@ -50,6 +50,17 @@ export const api = {
   deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),
   vendorTemplate: (id)          => call(`/vendors/${id}/template`),
   saveVendorTemplate: (id, t)   => call(`/vendors/${id}/template`, { method: 'PUT', body: { template: t } }),
+  // Returns an object URL for the specimen PDF; the caller revokes it.
+  previewTemplate: async (id, template) => {
+    const res = await fetch(`/api/vendors/${id}/template/preview`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template }),
+    });
+    if (!res.ok) throw new ApiError(await res.json().catch(() => null), res.status);
+    return URL.createObjectURL(await res.blob());
+  },
   uploadFont:  (form)           => fetch('/api/fonts', { method: 'POST', credentials: 'same-origin', body: form })
                                      .then(async (r) => {
                                        const d = await r.json().catch(() => null);

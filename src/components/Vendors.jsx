@@ -28,6 +28,9 @@ const BLANK_USER = { full_name: '', job_title: '', email: '', phone: '', roles: 
 export default function Vendors() {
   const [vendors, setVendors] = useState(null);
   const [fonts, setFonts]     = useState([]);
+  const [templateJson, setTemplateJson] = useState('');
+  const [tplMeta, setTplMeta] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
   const [users, setUsers]     = useState([]);
   const [clientUsers, setClientUsers] = useState([]);
   const [cForm, setCForm]     = useState({ full_name: '', email: '', roles: ['member'], password: '' });
@@ -56,6 +59,21 @@ export default function Vendors() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // The selected vendor's stored layout, so it can be reviewed and replaced.
+  useEffect(() => {
+    if (!selected) return;
+    let live = true;
+    api.vendorTemplate(selected)
+      .then((t) => {
+        if (!live) return;
+        setTplMeta(t);
+        setTemplateJson(t.template ? JSON.stringify(t.template, null, 2) : '');
+      })
+      .catch(() => { if (live) { setTplMeta(null); setTemplateJson(''); } });
+    setPreviewUrl(null);
+    return () => { live = false; };
+  }, [selected]);
 
   const setC = (k) => (e) => setCForm({ ...cForm, [k]: e.target.value });
   const setV = (k) => (e) => setVForm({ ...vForm, [k]: e.target.value });
@@ -162,6 +180,43 @@ ${PASSWORD_HINT}
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
     } finally { setBusyId(null); }
+  }
+
+  // A specimen render of what this template produces. Stamped SPECIMEN by the
+  // server, so it can never be mistaken for a real invoice.
+  async function preview() {
+    setError(null); setOk(null); setBusy(true);
+    try {
+      let parsed = null;
+      if (templateJson.trim()) {
+        try { parsed = JSON.parse(templateJson); }
+        catch { throw new ApiError({ message: 'That is not valid JSON.' }, 400); }
+      }
+      const url = await api.previewTemplate(selected, parsed);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(url);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not render the preview.');
+    } finally { setBusy(false); }
+  }
+
+  async function saveTemplate(clear = false) {
+    setError(null); setOk(null); setBusy(true);
+    try {
+      let parsed = null;
+      if (!clear) {
+        if (!templateJson.trim()) throw new ApiError({ message: 'Paste a template first.' }, 400);
+        try { parsed = JSON.parse(templateJson); }
+        catch { throw new ApiError({ message: 'That is not valid JSON.' }, 400); }
+      }
+      const t = await api.saveVendorTemplate(selected, clear ? null : parsed);
+      setTplMeta(t);
+      if (clear) setTemplateJson('');
+      setOk(clear ? 'Reverted to the default layout.' : 'Layout saved.');
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save the layout.');
+    } finally { setBusy(false); }
   }
 
   const current = (vendors || []).find((v) => v.id === selected) || null;
@@ -371,6 +426,76 @@ ${PASSWORD_HINT}
               {busy ? 'Saving…' : 'Onboard vendor'}
             </button>
           </form>
+        </Card>
+      )}
+
+      {current && (
+        <Card title={`${current.name} — invoice layout`}>
+          <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+            A digitised replica of this vendor's own invoice. Produce it from
+            their blank letterhead and one old invoice:
+            <code style={{ display: 'block', margin: '8px 0', color: T.text, fontSize: 12 }}>
+              python scripts/extract-template.py blank.pdf --code {current.code} --blank --layout old-invoice.pdf
+            </code>
+            then paste <code style={{ color: T.text }}>assets/{current.code}/template.json</code> below.
+            Preview before saving — the specimen is stamped and cannot be mistaken
+            for a real invoice.
+          </p>
+
+          <div style={{
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: '9px 12px',
+            marginBottom: 14, fontSize: 13, color: T.textDim,
+          }}>
+            {tplMeta?.isDefault
+              ? 'Using the built-in default layout — their artwork on our geometry.'
+              : `Using this vendor's own saved layout.`}
+          </div>
+
+          <Field label="Template JSON" hint="Leave empty to use the default layout.">
+            <textarea
+              style={{
+                ...inputStyle, minHeight: 180, resize: 'vertical',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12,
+              }}
+              value={templateJson}
+              onChange={(e) => setTemplateJson(e.target.value)}
+              placeholder="Paste the contents of template.json"
+            />
+          </Field>
+
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button onClick={preview} disabled={busy} style={button('ghost', busy)}>
+              {busy ? 'Rendering…' : 'Preview'}
+            </button>
+            <button onClick={() => saveTemplate(false)} disabled={busy || !templateJson.trim()}
+                    style={button('primary', busy || !templateJson.trim())}>
+              Save layout
+            </button>
+            {!tplMeta?.isDefault && (
+              <button onClick={() => saveTemplate(true)} disabled={busy}
+                      style={button('ghost', busy)}>
+                Revert to default
+              </button>
+            )}
+          </div>
+
+          {previewUrl && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <strong style={{ font: `600 13px ${FONT}` }}>Specimen</strong>
+                <a href={previewUrl} target="_blank" rel="noreferrer"
+                   style={{ color: T.blue, fontSize: 13 }}>Open full size</a>
+              </div>
+              <iframe
+                title="Template specimen"
+                src={previewUrl}
+                style={{
+                  width: '100%', height: 620, border: `1px solid ${T.border}`,
+                  borderRadius: 8, background: '#fff',
+                }}
+              />
+            </div>
+          )}
         </Card>
       )}
 

@@ -204,6 +204,8 @@ async function route(request, env, url) {
     return getVendorTemplate(env, me, Number(m[1]));
   if ((m = path.match(/^\/api\/vendors\/(\d+)\/template$/)) && method === 'PUT')
     return putVendorTemplate(request, env, me, Number(m[1]));
+  if ((m = path.match(/^\/api\/vendors\/(\d+)\/template\/preview$/)) && method === 'POST')
+    return previewVendorTemplate(request, env, me, Number(m[1]));
 
   if (path === '/api/users'  && method === 'GET')  return listUsers(env, me, url);
   if (path === '/api/users'  && method === 'POST') return createUser(request, env, me);
@@ -1090,6 +1092,88 @@ async function setVendorStatus(request, env, me, id) {
  * right. Writing is client-admin only, because a template is produced by the
  * onboarding extraction rather than hand-edited in normal operation.
  */
+/**
+ * Render a specimen so an admin can see what a vendor's template produces.
+ *
+ * This is the one place letterhead is drawn from something other than an
+ * issued invoice, so it is fenced carefully:
+ *
+ *   - client admins only, the people who run onboarding
+ *   - the content is FIXED here, not taken from the request. A caller cannot
+ *     put their own addressee, description or amounts on a letterheaded page
+ *   - the output is stamped SPECIMEN across the middle
+ *
+ * Without those three, this would be exactly the "render letterhead from
+ * ad-hoc field values" route that invariant 1 exists to prevent. With them the
+ * output is unmistakably a layout proof and cannot function as a payment
+ * document.
+ */
+async function previewVendorTemplate(request, env, me, id) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  const vendor = await env.DB.prepare(
+    'SELECT v.*, c.* FROM vendors v LEFT JOIN vendor_config c ON c.vendor_id = v.id WHERE v.id = ?1',
+  ).bind(id).first();
+  if (!vendor) return fail('not_found', 'No such vendor.', 404);
+
+  // Preview what was sent if anything was, so a template can be checked BEFORE
+  // it is saved; otherwise preview what is stored.
+  const b = await request.json().catch(() => ({}));
+  let tpl = b.template ?? null;
+  if (tpl === null && b.template !== null) {
+    try { tpl = vendor.template_json ? JSON.parse(vendor.template_json) : null; } catch { tpl = null; }
+  }
+  if (tpl) {
+    const errs = validateTemplate(tpl);
+    if (errs.length) return fail('invalid_template', errs[0], 422, { errors: errs });
+  }
+
+  const merged = mergeTemplate(tpl);
+  const assets = await loadAssets(env, vendor.code, vendor.contact_lines,
+                                  merged.artwork, merged.type.family);
+
+  // Fixed specimen content. Chosen to exercise the layout: a long-ish
+  // description, an extra column, and figures wide enough to show alignment.
+  const bytes = await renderInvoice({
+    bu_code: 'SPEC', site_code: 'MAIN', period: '2026-01', seq: 1,
+    addressee: 'Specimen Branch',
+    addressee_loc: 'Lagos.',
+    subject: 'Layout Specimen',
+    narrative: 'This document exists to show how your letterhead and layout '
+      + 'render. It is not a payment request and no money relates to it.',
+    extra_column_label: 'Reference',
+    lines: [{ description: 'Specimen line item for layout review',
+              extra: '0000000000', amount_kobo: 12345600 }],
+    amount_kobo: 12345600,
+    fee_kobo: vendor.fee_kobo ?? 10000,
+    vat_kobo: 0,
+    wht_kobo: 0,
+    total_kobo: 12345600 + (vendor.fee_kobo ?? 10000),
+    bank_account_name: vendor.bank_account_name || 'Account Name',
+    bank_account_number: vendor.bank_account_number || '0000000000',
+    bank_name: vendor.bank_name || 'Bank',
+    signatory_name: vendor.signatory_name || 'Signatory',
+    signatory_title: vendor.signatory_title || 'Title',
+    approver_name: vendor.signatory_name || 'Approver Name',
+    approver_title: vendor.signatory_title || 'Approver Title',
+    approver_phone: '+000 000 0000',
+    approver_email: 'approver@example.com',
+    vendor_name: vendor.name,
+    client_name: 'Specimen Client',
+    tin: vendor.tin,
+    issued_at: new Date().toISOString(),
+  }, assets, tpl, { specimen: true });
+
+  return new Response(bytes, {
+    headers: {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': 'inline; filename="template-specimen.pdf"',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
 async function getVendorTemplate(env, me, id) {
   const mine = me.org === 'vendor' && me.vendor_id === id && hasRole(me, 'admin');
   if (!mine) {

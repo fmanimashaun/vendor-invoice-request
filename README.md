@@ -7,18 +7,37 @@ duplicated and hand-edited for every request.
 
 ## The problem
 
-**Finance cannot pay without an invoice. The vendor runs a wallet, and a wallet
-does not produce invoices.**
+**Every naira spent has to be defensible to a tax authority. The vendor runs a
+wallet, and a wallet does not produce invoices.**
+
+Tell a revenue service you spent ₦200m on utilities and they will ask what
+backs it. An invoice from the vendor is that backing: a document, on their
+letterhead, naming a person who stood behind it. Bank statements alone are not
+— they show money leaving, not what it bought.
+
+The exposure is sharper than a missing receipt. The money goes into a **virtual
+collection account that carries our own name**, because that is how the
+vendor's wallet product works. On a statement it therefore reads as a transfer
+to ourselves. Without a vendor-issued invoice against each one, an auditor is
+looking at a large flow of money from the company to an account bearing the
+company's name and no evidence of a supply in return. That is not a
+bookkeeping inconvenience; it is the shape of a disallowed deduction, and
+potentially of something worse being alleged.
+
+So the invoices are not administrative tidiness. **They are the audit defence**,
+and they have to exist for every single payment, without exception and without
+depending on anyone's goodwill.
+
+### Why that is hard
 
 The vendor's product is a prepaid wallet: you top it up, and it settles the
 electricity, the router, the staff data. That model has no invoice in it. You
 send money in, the balance goes up, the bills get paid. Nothing about it
 naturally emits a document.
 
-But an approvals process needs a document per payment. So every top-up request
-turns into a favour asked of the vendor: *please hand-make us an invoice for
-this one.* Someone on their side opens a template, types in the amount, saves a
-PDF, sends it over.
+So every top-up turns into a favour asked of the vendor: *please hand-make us
+an invoice for this one.* Someone on their side opens a template, types in the
+amount, saves a PDF, sends it over.
 
 **That works right up until it doesn't**, and it fails for reasons that have
 nothing to do with the software:
@@ -30,10 +49,10 @@ nothing to do with the software:
   hand-making a document per request was always a courtesy rather than
   something they owed you.
 
-Either way the favour stops, the invoices stop, and **you cannot process the
-payment** — for a service you are otherwise perfectly able and willing to pay
-for. A manual courtesy is not a process. It has no SLA, no handover, and no
-reason to survive the person who was doing it.
+Either way the favour stops and the invoices stop — and now the spend is
+undocumented. Not merely awkward to process: **undefendable**, retrospectively,
+for every month the gap lasts. A manual courtesy is not a process. It has no
+SLA, no handover, and no reason to survive the person who was doing it.
 
 ### What this changes
 

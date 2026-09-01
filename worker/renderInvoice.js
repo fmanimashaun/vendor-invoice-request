@@ -7,7 +7,7 @@
 // `assets` holds the letterhead artwork and font bytes as Uint8Array, loaded by
 // the caller (KV in the Worker, fs in Node).
 
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { invoiceRef, naira } from '../shared/reference.js';
 import { mergeTemplate, hexRgb } from '../shared/template.js';
@@ -27,7 +27,7 @@ function fmtDate(iso) {
   } ${d.getUTCFullYear()}`;
 }
 
-export async function renderInvoice(inv, assets, template) {
+export async function renderInvoice(inv, assets, template, { specimen = false } = {}) {
   const tpl = mergeTemplate(template);
   const PAGE_W = tpl.page.w;
   const PAGE_H = tpl.page.h;
@@ -237,6 +237,27 @@ export async function renderInvoice(inv, assets, template) {
   const issued = new Date(inv.issued_at);
   pdf.setCreationDate(issued);
   pdf.setModificationDate(issued);
+
+  // A specimen is a template review, not a document. It is stamped across the
+  // page so it can never be mistaken for an issued invoice or passed off as
+  // one — the whole basis of this system is that a letterheaded document means
+  // a vendor approved a real payment.
+  if (specimen) {
+    const label = 'SPECIMEN — NOT AN INVOICE';
+    const size = 30;
+    const w = bold.widthOfTextAtSize(label, size);
+    page.drawText(label, {
+      x: (PAGE_W - w * 0.72) / 2,
+      y: PAGE_H * 0.42,
+      size,
+      font: bold,
+      color: rgb(0.85, 0.2, 0.2),
+      opacity: 0.28,
+      rotate: degrees(32),
+    });
+    pdf.setTitle('SPECIMEN');
+    pdf.setSubject('Template preview — not a payment document');
+  }
 
   return pdf.save({ useObjectStreams: false });
 }

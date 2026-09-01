@@ -859,6 +859,30 @@ r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf
 check('a family with no font files falls back instead of failing',
   r.status === 200 && r.data?.length > 20000, `status=${r.status}`);
 
+// Preview: the one place letterhead is drawn from something other than an
+// issued invoice, so it is fenced.
+r = await call('reladmin', '/api/vendors/1/template/preview', { method: 'POST', body: {} });
+check('an admin can render a specimen', r.status === 200 && r.data?.length > 10000,
+  `status=${r.status} bytes=${r.data?.length}`);
+check('and it is a PDF', new TextDecoder().decode(r.data.slice(0, 5)) === '%PDF-');
+
+r = await call('victor', '/api/vendors/1/template/preview', { method: 'POST', body: {} });
+check('a vendor cannot render a specimen', r.status === 403, `status=${r.status}`);
+r = await call('rel', '/api/vendors/1/template/preview', { method: 'POST', body: {} });
+check('nor can an ordinary member', r.status === 403, `status=${r.status}`);
+
+// A template can be checked BEFORE it is saved.
+r = await call('reladmin', '/api/vendors/1/template/preview', { method: 'POST', body: {
+  template: { ...partial, margins: { left: 40, right: 550 } } } });
+check('an unsaved template can be previewed', r.status === 200, `status=${r.status}`);
+check('previewing does not save it',
+  (await call('reladmin', '/api/vendors/1/template')).data?.isDefault === false,
+  'template unchanged');
+
+r = await call('reladmin', '/api/vendors/1/template/preview', { method: 'POST', body: {
+  template: { margins: { left: 500, right: 100 } } } });
+check('an invalid template is refused at preview too', r.status === 422, JSON.stringify(r.data));
+
 // Clearing returns the vendor to the default layout.
 r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
 check('a template can be cleared', r.status === 200 && r.data?.isDefault === true,

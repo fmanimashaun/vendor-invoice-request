@@ -5,9 +5,20 @@ shaped this way.
 
 ## What this is
 
-**Why this exists.** Finance cannot pay without an invoice. The vendor's
-product is a prepaid wallet, and a wallet does not emit invoices — so every
-top-up used to require someone at the vendor to hand-make a document. That
+**Why this exists.** Every payment has to be defensible to a tax authority.
+An invoice on the vendor's letterhead, naming a person who stood behind it, is
+what backs the deduction; a bank statement shows money leaving, not what it
+bought. And the money goes into a **virtual collection account carrying the
+client's own name**, so on a statement it reads as a transfer to themselves —
+without a vendor invoice against each one, an auditor sees a large flow to an
+account bearing the payer's name with no evidence of a supply in return.
+
+That is why an invoice must exist for every payment, without exception. It is
+the audit defence, not paperwork.
+
+The difficulty is that the vendor's product is a prepaid wallet, and a wallet
+does not emit invoices — so every top-up used to require someone at the vendor
+to hand-make a document. That
 depends on goodwill: an account manager whose targets your business serves, or
 being a large enough customer to be worth the effort. The account manager
 resigns, or the volume stops being material, and the favour ends — and then you
@@ -45,6 +56,8 @@ Two things that are still true and still easy to "fix" by mistake:
 
 - One vendor's bank account is named *the vendor's own name* because it is a
   virtual collection account that vendor issued to the client on their platform.
+  It is also precisely why the invoice matters: without one, that payment looks
+  like the company paying itself.
   Payer and beneficiary names matching is correct there. Do not normalise it.
 - That same arrangement is a pass-through: the vendor funds a utility wallet at
   cost and charges a fee, so only the fee is their supply. That is what
