@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS vendors (
   name          TEXT NOT NULL,
   -- JSON array of the letterhead contact lines, drawn as live text.
   contact_lines TEXT NOT NULL DEFAULT '[]',
+  -- A digitised replica of this vendor's invoice layout: page size, artwork
+  -- placement, colours, type sizes, column positions and vertical rhythm.
+  -- NULL means the built-in default layout. See shared/template.js.
+  template_json TEXT,
   status        TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   created_by    TEXT NOT NULL DEFAULT 'seed'

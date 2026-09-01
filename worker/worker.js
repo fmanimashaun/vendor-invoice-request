@@ -16,6 +16,7 @@ import {
   signSession, sessionCookie,
 } from './auth.js';
 import { renderInvoice } from './renderInvoice.js';
+import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE } from '../shared/template.js';
 import {
   REQUEST_TYPES,
   typeFor, numberingSiteIn, invoiceRef, downloadName, siteNameIn, buNameIn, periodLabel,
@@ -167,6 +168,10 @@ async function route(request, env, url) {
   if (path === '/api/vendors' && method === 'POST') return createVendor(request, env, me);
   if ((m = path.match(/^\/api\/vendors\/(\d+)\/status$/)) && method === 'POST')
     return setVendorStatus(request, env, me, Number(m[1]));
+  if ((m = path.match(/^\/api\/vendors\/(\d+)\/template$/)) && method === 'GET')
+    return getVendorTemplate(env, me, Number(m[1]));
+  if ((m = path.match(/^\/api\/vendors\/(\d+)\/template$/)) && method === 'PUT')
+    return putVendorTemplate(request, env, me, Number(m[1]));
 
   if (path === '/api/users'  && method === 'GET')  return listUsers(env, me, url);
   if (path === '/api/users'  && method === 'POST') return createUser(request, env, me);
@@ -678,9 +683,63 @@ async function setVendorStatus(request, env, me, id) {
   return json({ vendor: publicVendor(v) });
 }
 
+/**
+ * A vendor's digitised layout.
+ *
+ * Read is open to that vendor's own admin as well as the client admin — it is
+ * their stationery, and they are the ones who can tell whether the replica is
+ * right. Writing is client-admin only, because a template is produced by the
+ * onboarding extraction rather than hand-edited in normal operation.
+ */
+async function getVendorTemplate(env, me, id) {
+  const mine = me.org === 'vendor' && me.vendor_id === id && me.role === 'admin';
+  if (!mine) {
+    const denied = requireRosterAdmin(me);
+    if (denied) return denied;
+  }
+  const v = await env.DB.prepare('SELECT template_json FROM vendors WHERE id = ?1').bind(id).first();
+  if (!v) return fail('not_found', 'No such vendor.', 404);
+  let tpl = null;
+  try { tpl = v.template_json ? JSON.parse(v.template_json) : null; } catch { tpl = null; }
+  return json({ template: tpl, isDefault: !tpl, effective: mergeTemplate(tpl), default: DEFAULT_TEMPLATE });
+}
+
+async function putVendorTemplate(request, env, me, id) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  const b = await request.json().catch(() => null);
+  if (b === null) return fail('bad_request', 'Body must be JSON.');
+
+  // Passing null clears the template and returns the vendor to the default
+  // layout, which is the escape hatch when an extraction comes out wrong.
+  if (b.template === null) {
+    const r = await env.DB.prepare('UPDATE vendors SET template_json = NULL WHERE id = ?1').bind(id).run();
+    if (!r.meta.changes) return fail('not_found', 'No such vendor.', 404);
+    assetCache.clear();
+    return json({ template: null, isDefault: true });
+  }
+
+  const errs = validateTemplate(b.template);
+  if (errs.length) {
+    return fail('invalid_template', errs[0], 422, { errors: errs });
+  }
+
+  const r = await env.DB.prepare('UPDATE vendors SET template_json = ?1 WHERE id = ?2')
+    .bind(JSON.stringify(b.template), id).run();
+  if (!r.meta.changes) return fail('not_found', 'No such vendor.', 404);
+
+  // The artwork a template asks for may have changed, and assets are cached
+  // per vendor for the life of the isolate.
+  assetCache.clear();
+  console.warn('VENDOR_TEMPLATE_CHANGED', me.email, id);
+  return json({ template: b.template, isDefault: false, effective: mergeTemplate(b.template) });
+}
+
 const publicVendor = (v) => ({
   id: v.id, code: v.code, name: v.name, status: v.status,
   contact_lines: JSON.parse(v.contact_lines || '[]'),
+  has_template: !!v.template_json,
   fee_kobo: v.fee_kobo,
   staff_count: v.staff_count, invoice_count: v.invoice_count,
   created_at: v.created_at,
@@ -1254,7 +1313,8 @@ async function invoicePdf(env, me, invoiceNo) {
   // indicative before a vendor took it.
   const row = await env.DB.prepare(
     `SELECT i.*, r.addressee, r.addressee_loc, r.subject, r.narrative, r.description,
-            r.type_code, r.asset_key, v.code AS vendor_code, v.name AS vendor_name
+            r.type_code, r.asset_key, v.code AS vendor_code, v.name AS vendor_name,
+            v.template_json
        FROM invoices i
        JOIN requests r ON r.id = i.request_id
        JOIN vendors v ON v.id = i.vendor_id
@@ -1266,7 +1326,11 @@ async function invoicePdf(env, me, invoiceNo) {
   if (row.vendor_id !== me.vendor_id) return fail('not_found', 'No such invoice.', 404);
 
   const type = typeFor(row.type_code);
-  const assets = await loadAssets(env, row.vendor_code, row.contact_lines);
+  // The vendor's own layout. A row with no template renders the default.
+  let tpl = null;
+  try { tpl = row.template_json ? JSON.parse(row.template_json) : null; } catch { tpl = null; }
+  const merged = mergeTemplate(tpl);
+  const assets = await loadAssets(env, row.vendor_code, row.contact_lines, merged.artwork);
 
   const bytes = await renderInvoice({
     bu_code: row.bu_code,
@@ -1301,7 +1365,7 @@ async function invoicePdf(env, me, invoiceNo) {
     wht_kobo: row.wht_kobo,
     tin: row.tin,
     issued_at: row.issued_at.replace(' ', 'T') + 'Z',
-  }, assets);
+  }, assets, tpl);
 
   return new Response(bytes, {
     headers: {
@@ -1322,26 +1386,34 @@ const assetCache = new Map();   // vendor code -> loaded artwork + fonts
  * live text from the vendors row, not a raster: in the original source
  * template that image ran 123pt off the page edge and clipped the address.
  */
-async function loadAssets(env, vendorCode, contactLinesJson) {
+async function loadAssets(env, vendorCode, contactLinesJson, artwork) {
   const cached = assetCache.get(vendorCode);
   if (cached) return cached;
 
-  const get = async (key) => {
+  const get = async (key, required = true) => {
     const buf = await env.ASSETS_KV.get(key, 'arrayBuffer');
-    if (!buf) throw new Error(`Missing asset in KV: ${key}`);
+    if (!buf) {
+      if (required) throw new Error(`Missing asset in KV: ${key}`);
+      return null;
+    }
     return new Uint8Array(buf);
   };
 
+  // Only what this vendor's template actually places. A template referencing
+  // artwork that has not been uploaded yet renders without that band rather
+  // than failing the download outright.
+  const art = {};
+  for (const a of artwork) {
+    const bytes = await get(`${vendorCode}/${a.asset}.png`, false);
+    if (bytes) art[a.asset] = bytes;
+  }
+
   const assets = {
-    header:          await get(`${vendorCode}/header.png`),
-    footer:          await get(`${vendorCode}/footer.png`),
-    logo:            await get(`${vendorCode}/logo.png`),
-    taglineServices: await get(`${vendorCode}/tagline_services.png`),
-    taglineSlogan:   await get(`${vendorCode}/tagline_slogan.png`),
+    artwork: art,
     // Arimo: has the Naira glyph U+20A6 and is metrically Arial-compatible.
     // Liberation Sans does NOT have it and silently drops the symbol.
-    fontRegular:     await get('Arimo-Regular.ttf'),
-    fontBold:        await get('Arimo-Bold.ttf'),
+    fontRegular: await get('Arimo-Regular.ttf'),
+    fontBold:    await get('Arimo-Bold.ttf'),
     contact: JSON.parse(contactLinesJson || '[]'),
   };
   assetCache.set(vendorCode, assets);

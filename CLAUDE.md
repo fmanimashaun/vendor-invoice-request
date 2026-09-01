@@ -189,6 +189,52 @@ as `Arimo-Regular.ttf` / `Arimo-Bold.ttf` via `scripts/upload-assets.sh`. The
 fonts are shared across vendors and stored unprefixed; only the artwork is
 namespaced by vendor code.
 
+## Vendor layout templates
+
+A template is a digitised replica of one vendor's invoice: page size, artwork
+placement, colours, type sizes, margins, column positions, vertical rhythm.
+Stored as `vendors.template_json`; NULL means the built-in default layout.
+`shared/template.js` holds `DEFAULT_TEMPLATE`, `mergeTemplate` and
+`validateTemplate`; `renderInvoice.js` is a pure interpreter of the result and
+contains **no hardcoded geometry**. Keep it that way.
+
+What a template does NOT change is the document's *structure* — the sections
+and their order. Numbering, the duplicate guards and approver attribution all
+depend on that contract. A template decides how the document looks, not what it
+says.
+
+### Onboarding a vendor: ask for two documents
+
+```bash
+python scripts/extract-template.py blank-letterhead.pdf --code acme --blank     --layout an-old-invoice.pdf
+./scripts/upload-assets.sh acme
+# PUT {"template": <assets/acme/template.json>} to /api/vendors/<id>/template
+```
+
+- The **blank letterhead** supplies the stationery. Nothing on it is invoice
+  data, so every image and every word is kept and nothing can leak.
+- The **sample invoice** supplies the layout — margins, columns, type sizes,
+  ink colour. None of its text is kept, only measurements.
+
+Without `--blank` the script has to guess which text is stationery and which is
+the sample's own data. That guess got the bank account number wrong the first
+time it was run for real, which is why the default now keeps nothing from the
+bottom of the page and `--blank` warns when the page looks populated.
+
+### Things that will bite
+
+- **Validation runs at upload, not at render.** A vendor discovering their
+  layout is broken at the moment they approve something is far too late.
+- **Artwork may bleed up to 5% off the page.** Real letterheads do. The
+  clipped-address bug ran 11% off, so it is still caught.
+- **Missing artwork is skipped, not fatal.** A template naming a band the
+  vendor has not uploaded renders without it; a 500 at download would be worse.
+- **Fonts are not extracted.** Embedded fonts are subsets and rarely
+  redistributable, so everything renders in Arimo. A vendor whose stationery is
+  far from Arial metrics will see different line lengths.
+- `assetCache` is cleared on every template write — assets are cached per
+  vendor for the life of the isolate.
+
 ## Layout geometry
 
 The source template was **1109×1583 pt** — roughly 1.87× A4 and not a standard
@@ -299,7 +345,7 @@ src/
   shareInvoice.js       Web Share API handoff of the PDF to WhatsApp
     Shell.jsx           Card, Field, Table, Modal, Status, Banner
 scripts/
-  test-e2e.mjs          181 assertions against real SQLite via d1-shim
+  test-e2e.mjs          205 assertions against real SQLite via d1-shim
   d1-shim.mjs           D1 API over node:sqlite (test only)
   extract-assets.py     pull letterhead art out of a source PDF
   upload-assets.sh      push art + fonts to KV
@@ -329,7 +375,7 @@ node scripts/add-user.mjs vendor <vendor-code> approver@example.com "Their Name"
      approver "Business Development Manager" "+234 803 555 0142" 'a-long-password' > u.sql
 npx wrangler d1 execute vendor-invoice-request --local --file=u.sql
 
-npm test          # 181 assertions, no wrangler needed
+npm test          # 205 assertions, no wrangler needed
 npm run preview   # build + wrangler dev
 ```
 

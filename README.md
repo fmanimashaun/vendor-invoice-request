@@ -51,6 +51,15 @@ npm install
 
 ### 2. Letterhead artwork
 
+Ask each vendor for **two documents**: a blank letterhead and one old invoice.
+The blank supplies the stationery safely; the invoice supplies the layout.
+
+```bash
+pip install pdfplumber pillow
+python scripts/extract-template.py blank.pdf --code acme --blank --layout old-invoice.pdf
+./scripts/upload-assets.sh acme --local
+```
+
 The renderer needs each vendor's letterhead as PNGs plus a font. Extract the
 artwork from any of the existing sample PDFs:
 

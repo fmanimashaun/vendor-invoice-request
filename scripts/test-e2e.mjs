@@ -767,6 +767,103 @@ check('a vendor with no tax set has zero VAT and WHT',
 check('and its total is still amount + fee',
   plainInv.total_kobo === plainInv.amount_kobo + plainInv.fee_kobo, String(plainInv.total_kobo));
 
+results.push('\nVendor layout templates');
+
+// A vendor with no template renders the built-in layout.
+const noTpl = await call('reladmin', `/api/vendors/1/template`);
+check('a vendor with no template reports the default',
+  noTpl.status === 200 && noTpl.data?.isDefault === true, JSON.stringify(noTpl.data));
+check('the effective layout is still returned so it can be inspected',
+  !!noTpl.data?.effective?.page?.w, JSON.stringify(noTpl.data?.effective));
+
+// A partial template merges over the default rather than replacing it.
+const partial = {
+  version: 1,
+  page: { w: 595.28, h: 841.89 },
+  margins: { left: 60, right: 540 },
+  colors: { ink: '#003366' },
+  table: { colDesc: 60, colExtra: 320, colAmount: 540 },
+};
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: partial } });
+check('a template can be saved', r.status === 200, JSON.stringify(r.data));
+check('unspecified sections fall back to the default',
+  r.data?.effective?.type?.body === 10.5, JSON.stringify(r.data?.effective?.type));
+check('specified values win', r.data?.effective?.margins?.left === 60,
+  JSON.stringify(r.data?.effective?.margins));
+check('a partially specified section keeps its other defaults',
+  r.data?.effective?.colors?.rule === '#c7c7c7', JSON.stringify(r.data?.effective?.colors));
+
+r = await call('reladmin', '/api/vendors');
+check('the vendor list shows which vendors have a template',
+  (r.data?.vendors || []).find((v) => v.id === 1)?.has_template === true,
+  JSON.stringify((r.data?.vendors || []).map((v) => [v.code, v.has_template])));
+
+// The document still renders, and differently from the default.
+const tplPdf = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('an invoice renders through a custom template',
+  tplPdf.status === 200 && tplPdf.data?.length > 20000, `status=${tplPdf.status}`);
+check('and the output actually differs from the default layout',
+  tplPdf.data.length !== byVictor.data.length,
+  `${tplPdf.data.length} vs ${byVictor.data.length}`);
+
+// Templates that would produce an unusable document are refused at upload,
+// not discovered at approval time.
+for (const [name, bad] of [
+  ['margins that cross', { margins: { left: 400, right: 100 } }],
+  ['a column off the page', { table: { colAmount: 5000 } }],
+  ['artwork running off the edge',
+   { artwork: [{ asset: 'header', x: 500, top: 0, w: 400, h: 100 }] }],
+  ['artwork with no asset name',
+   { artwork: [{ x: 0, top: 0, w: 10, h: 10 }] }],
+  ['a colour that is not a colour', { colors: { ink: 'navy' } }],
+  ['static text with no position', { staticText: [{ text: 'Acme Ltd' }] }],
+]) {
+  r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: bad } });
+  check(`refuses ${name}`, r.status === 422 && r.data?.error === 'invalid_template',
+    `${r.status} ${JSON.stringify(r.data?.errors)}`);
+}
+
+// Stationery text survives; it is how a text-based letterhead is reproduced.
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  ...partial,
+  staticText: [{ text: 'ALPHA SERVICES LTD', x: 60, top: 40, size: 14, bold: true }],
+} } });
+check('stationery text is accepted', r.status === 200, JSON.stringify(r.data));
+const withStatic = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('and reaches the rendered document',
+  withStatic.status === 200 && withStatic.data.length !== tplPdf.data.length,
+  `${withStatic.data?.length} vs ${tplPdf.data.length}`);
+
+// Clearing returns the vendor to the default layout.
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
+check('a template can be cleared', r.status === 200 && r.data?.isDefault === true,
+  JSON.stringify(r.data));
+const backToDefault = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('and the document goes back to exactly what it was',
+  backToDefault.data.length === byVictor.data.length
+  && Buffer.compare(Buffer.from(backToDefault.data), Buffer.from(byVictor.data)) === 0,
+  `${backToDefault.data.length} vs ${byVictor.data.length}`);
+
+// A template naming artwork the vendor has not uploaded must not 500 at
+// download: a band missing is recoverable, a failed approval download is not.
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  ...partial,
+  artwork: [{ asset: 'nonexistent_band', x: 0, top: 0, w: 100, h: 40 }],
+} } });
+check('a template may name artwork that is not uploaded yet', r.status === 200, JSON.stringify(r.data));
+r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('and the PDF still renders without it', r.status === 200 && r.data?.length > 10000,
+  `status=${r.status}`);
+await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
+
+// Only the client admin writes; the owning vendor's admin may read.
+r = await call('admin', '/api/vendors/1/template');
+check('the owning vendor admin may read their own template', r.status === 200, `status=${r.status}`);
+r = await call('admin', '/api/vendors/1/template', { method: 'PUT', body: { template: partial } });
+check('but may not write it', r.status === 403, `status=${r.status}`);
+r = await call('rival', '/api/vendors/1/template');
+check('another vendor may not read it', r.status === 403, `status=${r.status}`);
+
 results.push('\nVendor onboarding');
 
 r = await call('reladmin', '/api/vendors');
