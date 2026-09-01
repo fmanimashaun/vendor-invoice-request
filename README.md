@@ -7,36 +7,85 @@ duplicated and hand-edited for every request.
 
 ## The problem
 
-An organisation pays recurring operational bills across many locations —
-electricity at each clinic, an internet router at each site, staff data and
-airtime per business unit. It does not pay the utility directly. A vendor funds
-the wallet or settles the bill, adds a fee, and invoices for it. Finance needs a
-document per payment to push through their approvals system.
+**Finance cannot pay without an invoice. The vendor runs a wallet, and a wallet
+does not produce invoices.**
 
-That document used to be a Google Doc, duplicated and hand-edited for every
-request. Which produced, reliably:
+The vendor's product is a prepaid wallet: you top it up, and it settles the
+electricity, the router, the staff data. That model has no invoice in it. You
+send money in, the balance goes up, the bills get paid. Nothing about it
+naturally emits a document.
 
-- **Duplicate funding.** The same September electricity bill funded twice is
-  money out of the door, and it is invisible: two documents with different
-  numbers describing the same underlying bill look like two legitimate
-  payments. OCR in the approvals system cannot tell them apart.
-- **Numbering that drifts.** Copy a document, forget to change the reference,
-  and two payments share one number. Or the number jumps and an auditor asks
-  why.
-- **Transcription errors.** A document addressed to one site carrying another
-  site's description, because it was duplicated from that site's request.
-- **Amounts that get misread.** The original template said "credit ₦75,000 to
-  the account below [₦100 for processing fee]". Accounts payable transferred
-  ₦75,000 every time, and the fee was short every time.
-- **No record of who approved what.** The paper trail said the vendor's company
-  name and nothing about which person at that vendor stood behind it.
-- **One vendor.** The document was that vendor's letterhead, hand-made by them.
-  Changing vendor meant changing the process.
+But an approvals process needs a document per payment. So every top-up request
+turns into a favour asked of the vendor: *please hand-make us an invoice for
+this one.* Someone on their side opens a template, types in the amount, saves a
+PDF, sends it over.
 
-### What this does about it
+**That works right up until it doesn't**, and it fails for reasons that have
+nothing to do with the software:
 
-The division is deliberate: **the system decides what a human should not be
-trusted to decide, and humans decide what only they can.**
+- The account manager who does it is the one whose targets your business
+  serves. They resign, and the person who inherits the account has no such
+  motivation.
+- Or your volume was never material to the vendor in the first place, and
+  hand-making a document per request was always a courtesy rather than
+  something they owed you.
+
+Either way the favour stops, the invoices stop, and **you cannot process the
+payment** — for a service you are otherwise perfectly able and willing to pay
+for. A manual courtesy is not a process. It has no SLA, no handover, and no
+reason to survive the person who was doing it.
+
+### What this changes
+
+It removes the manual step from the vendor's side and replaces it with a
+button.
+
+The requester raises the request. The vendor opens a queue, sees it, and
+approves. The invoice is generated **on their own letterhead, in their own
+layout, naming the member of their staff who approved it** — a document they
+would recognise as theirs, because it is a digitised replica of the one they
+used to make by hand.
+
+Their cost per invoice goes from *a person doing data entry* to *one click*.
+That is the whole point, and it produces the incentive that was missing: issuing
+the invoice is no longer a favour they have to be persuaded into, it is the
+cheapest possible way for them to get paid.
+
+**This is the constraint to hold on to.** Anything that adds work to the vendor
+side re-creates the original problem. If a change would make a vendor open a
+spreadsheet, retype a figure, or chase an attachment, it is the wrong change,
+however much it tidies things up elsewhere.
+
+Onboarding more than one vendor follows from the same logic. If a single
+vendor's cooperation is load-bearing, you are back to depending on their
+goodwill — just with better tooling. Every onboarded vendor sees the same
+pending queue and whichever approves first issues the invoice, so no one
+relationship is a single point of failure.
+
+### What it also fixes on the way
+
+Once the document is generated rather than hand-made, a set of errors that came
+free with the manual process stop happening:
+
+- **Duplicate funding.** Funding the same September bill twice is money out of
+  the door, and it is invisible — two documents with different numbers
+  describing one underlying bill look like two legitimate payments, and OCR in
+  the approvals system cannot tell them apart.
+- **Numbers that drift.** Duplicate a document, forget to change the
+  reference, and two payments share one. The number here is reserved at
+  approval and cannot be reused.
+- **Transcription errors** — a document addressed to one site carrying another
+  site's description, because it was copied from that site's request.
+- **Short transfers.** The hand-made template said "credit ₦75,000 to the
+  account below [₦100 for processing fee]". Accounts payable transferred
+  ₦75,000 every time. Every figure now gets its own line.
+- **No attribution.** The old paper trail carried a company name and nothing
+  about which person stood behind it.
+
+### Who decides what
+
+The system decides what a human should not be trusted to decide; humans decide
+what only they can.
 
 | Decision | Who | How |
 |---|---|---|
@@ -45,25 +94,23 @@ trusted to decide, and humans decide what only they can.**
 | Is the bill actually correct? | **The approver** | They hold the real bill. Approving is an attestation, so they can reject with a reason. |
 | Withdraw a mistake | The requester | Their own pending requests only. |
 
-The reason duplicate detection is a database constraint and not a checkbox on
-the approver's screen is **incentive**. Vendors are paid per transaction, and
-they now compete for a shared queue where approving first wins the work. Asking
-the party that profits from volume, and is rewarded for speed, to police
+Duplicate detection is a database constraint and not a checkbox on the
+approver's screen because of **incentive**. Vendors are paid per transaction,
+and they now compete for a shared queue where approving first wins the work.
+Asking the party that profits from volume, and is rewarded for speed, to police
 duplicates puts the control in exactly the wrong hands. Moving it into the
-schema takes the judgement away from them entirely.
+schema takes the judgement away from them entirely — which also keeps their
+side of the process to the single click the whole design depends on.
 
-Everything else follows from that:
+Everything else follows:
 
 - The invoice number is reserved **at approval**, never at request time, so a
   rejected request leaves no gap in an issued sequence.
 - Money is integer minor units end to end, and the document prints bill amount,
-  fee, VAT and total as separate lines, because the old one-line phrasing is
-  what caused the short transfers.
+  fee, VAT and total as separate lines.
 - Bank details, signatory, tax and the approver's own name are **copied onto
   the invoice at issue**, so editing configuration later cannot rewrite a
   document that has already gone out.
-- Any vendor can be onboarded, issues on their own letterhead, and sees only
-  the shared queue plus their own history.
 
 ## How it fits together
 

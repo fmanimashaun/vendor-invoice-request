@@ -5,16 +5,32 @@ shaped this way.
 
 ## What this is
 
-Replaces a manual Google Docs process. client staff raise a payment request;
-**every onboarded vendor sees one shared pending queue**; whichever vendor
-approves first takes the request out of everyone else's queue, and approval
-reserves an invoice number and renders a PDF **on that vendor's own
-letterhead**, naming the member of their staff who approved it. The vendor
-shares the PDF in a WhatsApp group, and it becomes the paper trail for
-ApprovalMax submission.
+**Why this exists.** Finance cannot pay without an invoice. The vendor's
+product is a prepaid wallet, and a wallet does not emit invoices — so every
+top-up used to require someone at the vendor to hand-make a document. That
+depends on goodwill: an account manager whose targets your business serves, or
+being a large enough customer to be worth the effort. The account manager
+resigns, or the volume stops being material, and the favour ends — and then you
+cannot pay for a service you are willing to pay for. A manual courtesy is not a
+process.
 
-The first vendor is row 1 in `vendors`, not a special case. The point of the design is
-that The client is not locked to one vendor and can run them all in one place.
+This replaces that step with a button. Client staff raise a request; every
+onboarded vendor sees one shared pending queue; whichever approves first takes
+it out of everyone else's queue, and approval reserves an invoice number and
+renders a PDF **on that vendor's own letterhead, in their own layout** (see
+Vendor layout templates), naming the member of their staff who approved it.
+Their cost per invoice goes from data entry to one click, which is what turns
+issuing it from a favour into the cheapest way for them to get paid.
+
+**Hold this constraint.** Anything that adds work to the vendor side re-creates
+the original problem. A change that makes a vendor open a spreadsheet, retype a
+figure or chase an attachment is the wrong change, however much it tidies up
+elsewhere. Supporting several vendors is the same argument one level up: if a
+single vendor's cooperation is load-bearing, you are still depending on
+goodwill.
+
+The vendor shares the PDF and it becomes the paper trail for the approvals
+system.
 
 **Tax is per-vendor configuration, not a platform assumption.** Earlier
 versions of this file argued the document was a wallet funding request rather
