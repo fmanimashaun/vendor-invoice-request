@@ -20,6 +20,7 @@ const FONT_DIR = process.env.FONT_DIR || '/usr/share/fonts/truetype/dejavu';
 const FONT_REGULAR = process.env.FONT_REGULAR || join(FONT_DIR, 'DejaVuSans.ttf');
 const FONT_BOLD = process.env.FONT_BOLD || join(FONT_DIR, 'DejaVuSans-Bold.ttf');
 
+const splitR = (u) => String(u?.roles || '').split(',').map((r) => r.trim());
 let pass = 0, fail = 0;
 const results = [];
 
@@ -121,7 +122,7 @@ DB.db.exec(`
 
 const pw = await hashPassword('correct-horse-battery');
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, vendor_id, role, job_title, phone,
+  `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
                       pw_hash, pw_salt, pw_iterations)
    VALUES (?,?,?,?,?,?,?,?,?,?)`,
 ).run('approver@alpha.example', 'An Approver', 'vendor', 1, 'approver',
@@ -129,7 +130,7 @@ DB.db.prepare(
 
 const pw2 = await hashPassword('another-long-password');
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, vendor_id, role, job_title, phone,
+  `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
                       pw_hash, pw_salt, pw_iterations)
    VALUES (?,?,?,?,?,?,?,?,?,?)`,
 ).run('admin@alpha.example', 'Alpha Admin', 'vendor', 1, 'admin',
@@ -138,19 +139,19 @@ DB.db.prepare(
 // A rival vendor's approver: sees the same queue, none of the other vendor's history.
 const pw3 = await hashPassword('northwind-long-password');
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, vendor_id, role, job_title, phone,
+  `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
                       pw_hash, pw_salt, pw_iterations)
    VALUES (?,?,?,?,?,?,?,?,?,?)`,
 ).run('ngozi@northwind.com', 'Ngozi Eze', 'vendor', 2, 'approver',
       'Director', '+234 805 222 3333', pw3.hash, pw3.salt, pw3.iterations);
 
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, role) VALUES (?,?,?,?)`,
-).run('requester@client.example', 'A Requester', 'client', 'requester');
+  `INSERT INTO users (email, full_name, org, roles) VALUES (?,?,?,?)`,
+).run('requester@client.example', 'A Requester', 'client', 'member');
 
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, role) VALUES (?,?,?,?)`,
-).run('roster.admin@client.example', 'Roster Admin', 'client', 'admin');
+  `INSERT INTO users (email, full_name, org, roles) VALUES (?,?,?,?)`,
+).run('roster.admin@client.example', 'Roster Admin', 'client', 'admin,member');
 
 // ── Request helpers ───────────────────────────────────────────────────
 
@@ -725,7 +726,7 @@ check('an impossible VAT rate is refused', r.status === 400, JSON.stringify(r.da
 
 const pwTax = await hashPassword('taxed-long-password-1');
 DB.db.prepare(
-  `INSERT INTO users (email, full_name, org, vendor_id, role, job_title, phone,
+  `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
                       pw_hash, pw_salt, pw_iterations)
    VALUES (?,?,?,?,?,?,?,?,?,?)`,
 ).run('t@taxed.com', 'Tax Person', 'vendor', taxedId, 'approver', 'MD', '+234 1',
@@ -955,6 +956,65 @@ check('once unused it can be deleted', r.status === 200, JSON.stringify(r.data))
 r = await call('reladmin', '/api/fonts/arimo', { method: 'DELETE' });
 check('a bundled font cannot be deleted', r.status === 403, `status=${r.status}`);
 
+results.push('\nClient staff accounts');
+
+r = await call('reladmin', '/api/users?org=client');
+check('the client roster is listed separately', r.status === 200
+  && (r.data?.users || []).every((u) => u.org === 'client'),
+  JSON.stringify((r.data?.users || []).map((u) => u.org)));
+
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'newstaff@client.example', full_name: 'New Staff',
+  roles: ['member'], password: 'a-long-enough-password' } });
+check('an admin adds a client user', r.status === 201, JSON.stringify(r.data));
+check('with no vendor attached', r.data?.user?.vendor_id == null, JSON.stringify(r.data?.user));
+
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'newstaff@client.example', password: 'a-long-enough-password' } });
+check('and they can sign in before SSO exists', r.status === 200, JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'nopw@client.example', full_name: 'No Password', roles: ['member'] } });
+check('a client user without a password is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'x@client.example', full_name: 'X', roles: ['member'],
+  vendor_id: 1, password: 'a-long-enough-password' } });
+check('a client user cannot be attached to a vendor', r.status === 400, JSON.stringify(r.data));
+
+// Client staff never appear on an invoice, so their job title is optional —
+// unlike a vendor approver's, which is printed in the signature block.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'vendor', vendor_id: 1, email: 'notitle@alpha.example', full_name: 'No Title',
+  roles: ['approver'], password: 'a-long-enough-password' } });
+check('a vendor user still needs a job title and phone', r.status === 400, JSON.stringify(r.data));
+
+// Admins can add admins, and the last one cannot be removed.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'admin2@client.example', full_name: 'Second Admin',
+  roles: ['admin'], password: 'a-long-enough-password' } });
+check('an admin can add another admin', r.status === 201, JSON.stringify(r.data));
+const admin2 = r.data?.user?.id;
+
+const rootAdmin = DB.db.prepare(
+  "SELECT id FROM users WHERE email='roster.admin@client.example'").get();
+r = await call('reladmin', `/api/users/${rootAdmin.id}/status`, { method: 'POST', body: { status: 'disabled' } });
+check('an admin cannot disable their own account', r.status === 403, JSON.stringify(r.data));
+
+r = await call('reladmin', `/api/users/${admin2}/status`, { method: 'POST', body: { status: 'disabled' } });
+check('but can remove another admin while one remains', r.status === 200, JSON.stringify(r.data));
+
+// With only one admin left, removing them would leave nobody able to
+// administer vendors, locations or sign-on at all.
+DB.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('active', admin2);
+const asAdmin2 = 'admin2';
+await sessionFor(asAdmin2, 'admin2@client.example');
+r = await call(asAdmin2, `/api/users/${rootAdmin.id}/status`, { method: 'POST', body: { status: 'disabled' } });
+check('two admins: one may remove the other', r.status === 200, JSON.stringify(r.data));
+r = await call(asAdmin2, `/api/users/${admin2}/status`, { method: 'POST', body: { status: 'disabled' } });
+check('the last remaining admin cannot be removed', r.status === 403, JSON.stringify(r.data));
+DB.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('active', rootAdmin.id);
+
 results.push('\nVendor onboarding');
 
 r = await call('reladmin', '/api/vendors');
@@ -1023,7 +1083,7 @@ r = await call('rel', '/api/users');
 check('a client requester may not list the roster', r.status === 403, `status=${r.status}`);
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
-  email: 'new.person@alpha.example', full_name: 'New Person', role: 'approver', vendor_id: 1,
+  email: 'new.person@alpha.example', full_name: 'New Person', roles: ['approver'], vendor_id: 1,
   job_title: 'Field Engineer', phone: '+234 807 000 1111', password: 'a-long-enough-password',
 } });
 check('client admin creates a vendor user', r.status === 201, JSON.stringify(r.data));
@@ -1033,25 +1093,25 @@ check('the created user carries job title and phone',
 const newUserId = r.data?.user?.id;
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
-  email: 'nophone@alpha.example', full_name: 'No Phone', role: 'approver', vendor_id: 1,
+  email: 'nophone@alpha.example', full_name: 'No Phone', roles: ['approver'], vendor_id: 1,
   job_title: 'Engineer', password: 'a-long-enough-password',
 } });
 check('phone is required, because it is printed', r.status === 400, JSON.stringify(r.data));
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
-  email: 'someone@client.example', full_name: 'Someone', role: 'requester',
+  email: 'someone@client.example', full_name: 'Someone', roles: ['member'],
   org: 'client', vendor_id: 1, job_title: 'X', phone: 'Y', password: 'a-long-enough-password',
 } });
 check('client accounts cannot be created here', r.status === 400, JSON.stringify(r.data));
 
 r = await call('victor', '/api/users', { method: 'POST', body: {
-  email: 'sneaky@alpha.example', full_name: 'Sneaky', role: 'admin', vendor_id: 1,
+  email: 'sneaky@alpha.example', full_name: 'Sneaky', roles: ['admin'], vendor_id: 1,
   job_title: 'X', phone: 'Y', password: 'a-long-enough-password',
 } });
 check('a vendor cannot add itself an account', r.status === 403, `status=${r.status}`);
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
-  email: 'ghost@nowhere.com', full_name: 'Ghost', role: 'approver', vendor_id: 999,
+  email: 'ghost@nowhere.com', full_name: 'Ghost', roles: ['approver'], vendor_id: 999,
   job_title: 'X', phone: 'Y', password: 'a-long-enough-password',
 } });
 check('a user cannot be attached to a vendor that does not exist',
@@ -1074,18 +1134,94 @@ results.push('\nclient admin is view-only on requests');
 
 r = await call('reladmin', '/api/requests');
 check('client admin may read the request table', r.status === 200, `status=${r.status}`);
-r = await call('reladmin', '/api/requests', { method: 'POST', body: {
-  bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733', period: '2026-11',
+// The seeded admin holds BOTH roles, which is the ordinary case: one person
+// who administers and also raises requests. Holding both is not the same as
+// using both at once — the session acts in one context at a time.
+const raiseBody = {
+  bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733',
+  period: '2026-10', amount_kobo: 100000, description: 'Raised by an admin who is also a member',
+};
+
+r = await call('reladmin', '/api/requests', { method: 'POST', body: raiseBody });
+check('holding member is not enough while acting as admin',
+  r.status === 403 && r.data?.error === 'wrong_context', JSON.stringify(r.data));
+check('and the refusal says which context is needed',
+  (r.data?.need || []).includes('member') && r.data?.acting === 'admin', JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'member' } });
+check('the session can be switched to a role the account holds', r.status === 200,
+  JSON.stringify(r.data));
+check('and reports the new context', r.data?.user?.context === 'member',
+  JSON.stringify(r.data?.user));
+
+r = await call('reladmin', '/api/requests', { method: 'POST', body: raiseBody });
+check('after switching, the same person may raise a request', r.status === 201,
+  JSON.stringify(r.data));
+
+// The boundary cuts both ways: admin powers are out of reach while acting as
+// a member, which is the whole point — a session is scoped to one job.
+r = await call('reladmin', '/api/vendors');
+check('admin routes are closed while acting as a member',
+  r.status === 403 && r.data?.error === 'wrong_context', JSON.stringify(r.data));
+r = await call('reladmin', '/api/sso-config');
+check('so are the sign-on settings', r.status === 403, `status=${r.status}`);
+
+r = await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'approver' } });
+check('a role the account does not hold cannot be assumed',
+  r.status === 403 && r.data?.error === 'forbidden', JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'admin' } });
+check('switching back restores admin', r.status === 200 && r.data?.user?.context === 'admin',
+  JSON.stringify(r.data?.user));
+r = await call('reladmin', '/api/vendors');
+check('and admin routes work again', r.status === 200, `status=${r.status}`);
+
+// 'anon' has picked up a session from the login assertions above, so use a
+// caller that has never held one.
+r = await call('nobody', '/api/auth/context', { method: 'POST', body: { role: 'admin' } });
+check('switching context requires a session', r.status === 401, `status=${r.status}`);
+
+// An admin who is NOT a member may not: administration and raising are
+// separate capabilities, and holding one does not imply the other.
+const adminOnlyPw = await hashPassword('admin-only-password');
+DB.db.prepare(
+  `INSERT INTO users (email, full_name, org, roles, pw_hash, pw_salt, pw_iterations)
+   VALUES (?,?,?,?,?,?,?)`,
+).run('adminonly@client.example', 'Admin Only', 'client', 'admin',
+      adminOnlyPw.hash, adminOnlyPw.salt, adminOnlyPw.iterations);
+await sessionFor('adminonly', 'adminonly@client.example');
+r = await call('adminonly', '/api/requests', { method: 'POST', body: {
+  bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733', period: '2026-10',
   amount_kobo: 100000, description: 'Should not be allowed',
 } });
-check('client admin cannot raise a request', r.status === 403, JSON.stringify(r.data));
+check('an admin without member cannot raise a request', r.status === 403, JSON.stringify(r.data));
+
+// The default landing context must be a role the person actually holds.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'bothroles@client.example', full_name: 'Both Roles',
+  roles: ['admin', 'member'], default_role: 'member', password: 'a-long-enough-password' } });
+check('a user can hold both roles', r.status === 201
+  && (r.data?.user?.roles || []).length === 2, JSON.stringify(r.data?.user));
+check('and lands in the role they were given as default',
+  r.data?.user?.default_role === 'member', JSON.stringify(r.data?.user));
+
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'baddefault@client.example', full_name: 'Bad Default',
+  roles: ['member'], default_role: 'admin', password: 'a-long-enough-password' } });
+check('a default context they do not hold is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'wrongrole@client.example', full_name: 'Wrong Role',
+  roles: ['approver'], password: 'a-long-enough-password' } });
+check('a vendor role cannot be given to client staff', r.status === 400, JSON.stringify(r.data));
 
 results.push('\nSSO provisioning');
 
 let sso = await resolveOrProvisionSsoUser(env, { email: 'Brand.New@client.example', name: 'Brand New' });
 check('a first SSO sign-in provisions an account', !!sso.user, JSON.stringify(sso));
-check('provisioned as client/requester',
-  sso.user?.org === 'client' && sso.user?.role === 'requester', `${sso.user?.org}/${sso.user?.role}`);
+check('provisioned as a client member',
+  sso.user?.org === 'client' && splitR(sso.user).includes('member'),
+  `${sso.user?.org}/${sso.user?.roles}`);
 check('the provisioned email is lowercased',
   sso.user?.email === 'brand.new@client.example', sso.user?.email);
 check('the provisioned account has no password', sso.user?.pw_hash === null);
@@ -1098,8 +1234,8 @@ check('a second sign-in reuses the same row', sso.user?.id === provisionedId);
 // The token never decides org or role.
 sso = await resolveOrProvisionSsoUser(env,
   { email: 'claims@client.example', org: 'vendor', role: 'approver' });
-check('org and role in the token are ignored',
-  sso.user?.org === 'client' && sso.user?.role === 'requester', `${sso.user?.org}/${sso.user?.role}`);
+check('org and roles in the token are ignored',
+  sso.user?.org === 'client' && splitR(sso.user).includes('member'), `${sso.user?.org}/${sso.user?.roles}`);
 
 DB.db.prepare('UPDATE users SET status=? WHERE id=?').run('disabled', provisionedId);
 sso = await resolveOrProvisionSsoUser(env, { email: 'brand.new@client.example' });
@@ -1174,38 +1310,105 @@ check('a vendor sees only the open queue plus its own decided work',
     || x.decided_vendor_name === 'Alpha Services Ltd'),
   JSON.stringify(vendorRows.map((x) => `${x.request_ref}:${x.status}:${x.decided_vendor_name}`)));
 
-results.push('\nSSO landing route');
+results.push('\nSign-in methods and the SSO cutover');
 
-// Access itself is not exercised — no offline signing key — but the failure
-// modes matter, because they are what an operator sees during setup.
-const raw = (path, headers = {}) =>
-  worker.fetch(new Request(`https://app.test${path}`, { headers }), env, {});
+const raw = (path, headers = {}, init = {}) =>
+  worker.fetch(new Request(`https://app.test${path}`, { headers, ...init }), env, {});
+
+// Out of the box: passwords for everyone, no SSO.
+r = await call('anon', '/api/auth/methods');
+check('sign-in methods are readable without a session', r.status === 200, `status=${r.status}`);
+check('SSO is off until an admin sets it up', r.data?.sso === false, JSON.stringify(r.data));
+check('client staff may use a password meanwhile', r.data?.clientPassword === true,
+  JSON.stringify(r.data));
 
 r = await raw('/api/auth/sso');
 let body = await r.json();
+check('the SSO route is closed while SSO is off',
+  r.status === 403 && body.error === 'sso_disabled', `${r.status} ${body.error}`);
+
+// A client admin can sign in with a password before SSO exists — otherwise a
+// fresh deployment has no way in at all.
+const pwClient = await hashPassword('client-admin-password');
+DB.db.prepare(
+  `UPDATE users SET pw_hash = ?, pw_salt = ?, pw_iterations = ? WHERE email = ?`,
+).run(pwClient.hash, pwClient.salt, pwClient.iterations, 'roster.admin@client.example');
+
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'roster.admin@client.example', password: 'client-admin-password' } });
+check('a client admin can sign in with a password before SSO', r.status === 200,
+  JSON.stringify(r.data));
+check('and is identified as client staff', r.data?.user?.org === 'client',
+  JSON.stringify(r.data?.user));
+
+// Configuring SSO.
+r = await call('reladmin', '/api/sso-config', { method: 'PUT', body: {
+  enabled: true, aud: 'aud-tag' } });
+check('SSO cannot be switched on without a team domain', r.status === 400, JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/sso-config', { method: 'PUT', body: {
+  team_domain: 'not a domain', aud: 'aud-tag' } });
+check('a malformed team domain is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await call('victor', '/api/sso-config', { method: 'PUT', body: {
+  team_domain: 'team.cloudflareaccess.com', aud: 'x', enabled: true } });
+check('a vendor cannot configure SSO', r.status === 403, `status=${r.status}`);
+
+r = await call('reladmin', '/api/sso-config', { method: 'PUT', body: {
+  team_domain: 'team.cloudflareaccess.com', aud: 'aud-tag',
+  allowed_domains: 'client.example', enabled: true } });
+check('an admin configures and enables SSO', r.status === 200, JSON.stringify(r.data));
+check('it reports as enabled and configured',
+  r.data?.enabled === true && r.data?.configured === true, JSON.stringify(r.data));
+
+// THE POINT: switching it on does not cut passwords off. Nobody has proved the
+// identity provider works yet, and a wrong AUD tag would lock out the only
+// admin who could switch it back.
+check('passwords still work for client staff until SSO is proven',
+  r.data?.verified === false && r.data?.clientPassword === true, JSON.stringify(r.data));
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'roster.admin@client.example', password: 'client-admin-password' } });
+check('and the client admin can still get in', r.status === 200, JSON.stringify(r.data));
+
+// Failure modes an operator meets during setup.
+r = await raw('/api/auth/sso');
+body = await r.json();
 check('no Access header -> 503 access_not_configured',
   r.status === 503 && body.error === 'access_not_configured', `${r.status} ${body.error}`);
 check('the error names the path that needs an Access policy',
   /api\/auth\/sso/.test(body.message), body.message);
 
-r = await raw('/api/auth/sso', { 'Cf-Access-Jwt-Assertion': 'garbage' });
-body = await r.json();
-check('Access header present but ACCESS_* unset -> 503',
-  r.status === 503 && body.error === 'access_not_configured', `${r.status} ${body.error}`);
-
-env.ACCESS_TEAM_DOMAIN = 'team.cloudflareaccess.com';
-env.ACCESS_AUD = 'aud-tag';
-
 r = await raw('/api/auth/sso', { 'Cf-Access-Jwt-Assertion': 'not.a.jwt' });
 body = await r.json();
-check('malformed Access JWT -> 401', r.status === 401 && body.error === 'bad_access_token',
+check('a malformed Access token -> 401', r.status === 401 && body.error === 'bad_access_token',
   `${r.status} ${body.error}`);
-
 r = await raw('/api/auth/sso', { 'Cf-Access-Jwt-Assertion': 'a.b' });
-check('two-segment token rejected', r.status === 401, String(r.status));
+check('a two-segment token is rejected', r.status === 401, String(r.status));
 
-delete env.ACCESS_TEAM_DOMAIN;
-delete env.ACCESS_AUD;
+// Simulate the first successful sign-in, which is what completes the cutover.
+DB.db.prepare("UPDATE config SET sso_verified_at = datetime('now') WHERE id = 1").run();
+
+r = await call('reladmin', '/api/sso-config');
+check('once proven, client password sign-in reports as off',
+  r.data?.verified === true && r.data?.clientPassword === false, JSON.stringify(r.data));
+
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'roster.admin@client.example', password: 'client-admin-password' } });
+check('client staff can no longer use a password',
+  r.status === 403 && r.data?.error === 'password_login_disabled', JSON.stringify(r.data));
+
+// Vendors are not in the client's directory and are unaffected by any of this.
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'approver@alpha.example', password: 'correct-horse-battery' } });
+check('vendor password sign-in is untouched by the cutover', r.status === 200,
+  JSON.stringify(r.data));
+
+r = await call('anon', '/api/auth/methods');
+check('the login screen is told client passwords are off',
+  r.data?.clientPassword === false && r.data?.sso === true, JSON.stringify(r.data));
+
+// Back to passwords, so later assertions run against a plain deployment.
+DB.db.prepare('UPDATE config SET sso_enabled = 0, sso_verified_at = NULL WHERE id = 1').run();
 
 // ── Report ────────────────────────────────────────────────────────────
 

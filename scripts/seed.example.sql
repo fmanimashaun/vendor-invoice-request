@@ -28,13 +28,17 @@ INSERT OR IGNORE INTO bu_sites (bu_code, site_code) VALUES
   ('OPS', 'NTH'),
   ('OPS', 'STH');
 
--- The first admin. They own the vendor list, every vendor roster, and the
--- locations above. Email must match what your IdP asserts.
+-- The root admin. They own the vendor list, every vendor roster, the locations
+-- above and the single sign-on settings, and can add further admins.
 --
--- Other client staff are provisioned automatically on first SSO sign-in, as
--- requesters. Vendor accounts are created in the app by this admin.
-INSERT OR IGNORE INTO users (email, full_name, org, role) VALUES
-  ('admin@example.com', 'First Admin', 'client', 'admin');
+-- Single sign-on is OFF until they configure it, so give this account a
+-- password with scripts/add-user.mjs and sign in with it. Once SSO is set up
+-- and someone has completed a sign-on with it, client passwords stop working
+-- and staff are provisioned automatically on first sign-in.
+--
+-- If you will use SSO, this email must match what your IdP asserts.
+INSERT OR IGNORE INTO users (email, full_name, org, roles) VALUES
+  ('admin@example.com', 'First Admin', 'client', 'admin,member');
 
 -- Vendors are onboarded in the app rather than seeded: they need bank details,
 -- a signatory, optional tax settings, and letterhead artwork uploaded to KV

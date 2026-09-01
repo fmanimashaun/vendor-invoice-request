@@ -11,7 +11,7 @@ const BLANK_VENDOR = {
   tin: '', vat_rate_pct: '', wht_rate_pct: '', vat_basis: 'invoice',
   font_family: 'arimo',
 };
-const BLANK_USER = { full_name: '', job_title: '', email: '', phone: '', role: 'approver', password: '' };
+const BLANK_USER = { full_name: '', job_title: '', email: '', phone: '', roles: ['approver'], password: '' };
 
 /**
  * Vendors and their staff, owned by the client admin.
@@ -28,6 +28,8 @@ export default function Vendors() {
   const [vendors, setVendors] = useState(null);
   const [fonts, setFonts]     = useState([]);
   const [users, setUsers]     = useState([]);
+  const [clientUsers, setClientUsers] = useState([]);
+  const [cForm, setCForm]     = useState({ full_name: '', email: '', roles: ['member'], password: '' });
   const [selected, setSelected] = useState(null);   // vendor id
   const [showNewVendor, setShowNewVendor] = useState(false);
   const [vForm, setVForm]     = useState(BLANK_VENDOR);
@@ -39,11 +41,12 @@ export default function Vendors() {
 
   const load = useCallback(async () => {
     try {
-      const [{ vendors: vs }, { users: us }, { fonts: fs }] =
-        await Promise.all([api.vendors(), api.users(), api.fonts()]);
+      const [{ vendors: vs }, { users: us }, { fonts: fs }, { users: cu }] =
+        await Promise.all([api.vendors(), api.users(), api.fonts(), api.clientUsers()]);
       setVendors(vs);
       setUsers(us);
       setFonts(fs || []);
+      setClientUsers(cu || []);
       setSelected((cur) => cur ?? vs[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load vendors.');
@@ -53,6 +56,7 @@ export default function Vendors() {
 
   useEffect(() => { load(); }, [load]);
 
+  const setC = (k) => (e) => setCForm({ ...cForm, [k]: e.target.value });
   const setV = (k) => (e) => setVForm({ ...vForm, [k]: e.target.value });
   const setU = (k) => (e) => setUForm({ ...uForm, [k]: e.target.value });
 
@@ -60,7 +64,7 @@ export default function Vendors() {
     && vForm.bank_account_number && vForm.bank_name
     && vForm.signatory_name && vForm.signatory_title;
   const userComplete = selected && uForm.full_name && uForm.job_title
-    && uForm.email && uForm.phone && uForm.password.length >= 12;
+    && uForm.email && uForm.phone && uForm.roles.length && uForm.password.length >= 12;
 
   async function addVendor(e) {
     e.preventDefault();
@@ -99,6 +103,19 @@ export default function Vendors() {
     }
   }
 
+  async function addClientUser(e) {
+    e.preventDefault();
+    setError(null); setOk(null); setBusy(true);
+    try {
+      const { user } = await api.createUser({ ...cForm, org: 'client' });
+      setCForm({ full_name: '', email: '', roles: ['member'], password: '' });
+      setOk(`${user.full_name} can now sign in.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
+    } finally { setBusy(false); }
+  }
+
   async function toggleUser(u) {
     const next = u.status === 'active' ? 'disabled' : 'active';
     if (next === 'disabled'
@@ -130,6 +147,72 @@ export default function Vendors() {
 
   return (
     <>
+      <Card title="Your team">
+        <Banner onClose={() => setError(null)}>{error}</Banner>
+        <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          Your own staff. Admins can add users and onboard vendors; requesters
+          raise payment requests. Once single sign-on is set up and proven,
+          these accounts sign in through your identity provider instead and new
+          staff appear here automatically on first sign-in.
+        </p>
+        <Table head={['Name', 'Email', 'Role', 'Status', '']}
+               empty={clientUsers.length === 0 ? 'No staff yet.' : null}>
+          {clientUsers.map((u) => {
+            const off = u.status !== 'active';
+            return (
+              <tr key={u.id} style={{ opacity: off ? 0.5 : 1 }}>
+                <Td>{u.full_name}</Td>
+                <Td mono>{u.email}</Td>
+                <Td dim>{(u.roles || []).join(', ')}</Td>
+                <Td dim>{off ? 'removed' : 'active'}</Td>
+                <Td right>
+                  <button disabled={busyId === `u${u.id}`} onClick={() => toggleUser(u)}
+                          style={button('ghost', busyId === `u${u.id}`)}>
+                    {off ? 'Restore' : 'Remove'}
+                  </button>
+                </Td>
+              </tr>
+            );
+          })}
+        </Table>
+
+        <form onSubmit={addClientUser} style={{ marginTop: 18, borderTop: `1px solid ${T.border}`, paddingTop: 18 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: '0 16px' }}>
+            <Field label="Full name">
+              <input style={inputStyle} value={cForm.full_name} onChange={setC('full_name')} />
+            </Field>
+            <Field label="Email">
+              <input style={inputStyle} type="email" value={cForm.email} onChange={setC('email')} />
+            </Field>
+            <Field label="Roles" hint="Both is normal: an admin who also raises requests.">
+              <div style={{ display: 'flex', gap: 14, alignItems: 'center', minHeight: 38 }}>
+                {[['member', 'Member'], ['admin', 'Admin']].map(([r, label]) => (
+                  <label key={r} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input type="checkbox" checked={cForm.roles.includes(r)}
+                           onChange={(e) => setCForm({
+                             ...cForm,
+                             roles: e.target.checked
+                               ? [...cForm.roles, r]
+                               : cForm.roles.filter((x) => x !== r),
+                           })} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </Field>
+            <Field label="Password" hint="At least 12 characters. Used until SSO takes over.">
+              <input style={inputStyle} type="password" value={cForm.password} onChange={setC('password')} />
+            </Field>
+          </div>
+          <button type="submit"
+                  disabled={busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < 12}
+                  style={button('primary', busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < 12)}>
+            Add user
+          </button>
+        </form>
+      </Card>
+
       <Card
         title="Vendors"
         right={
@@ -279,7 +362,7 @@ export default function Vendors() {
                   <Td dim>{u.job_title || '—'}</Td>
                   <Td mono>{u.email}</Td>
                   <Td mono>{u.phone || '—'}</Td>
-                  <Td dim>{u.role}</Td>
+                  <Td dim>{(u.roles || []).join(', ')}</Td>
                   <Td>
                     <span style={{
                       display: 'inline-block', padding: '2px 9px', borderRadius: 999,
@@ -323,12 +406,21 @@ export default function Vendors() {
                   <input style={inputStyle} value={uForm.phone} onChange={setU('phone')}
                          placeholder="+234 803 555 0142" />
                 </Field>
-                <Field label="Role" hint="Approvers and admins can approve requests.">
-                  <select style={inputStyle} value={uForm.role} onChange={setU('role')}>
-                    <option value="approver">Approver</option>
-                    <option value="admin">Admin</option>
-                    <option value="requester">Requester</option>
-                  </select>
+                <Field label="Roles" hint="Approvers and admins can both approve.">
+                  <div style={{ display: 'flex', gap: 14, alignItems: 'center', minHeight: 38 }}>
+                    {[['approver', 'Approver'], ['admin', 'Admin']].map(([r, label]) => (
+                      <label key={r} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input type="checkbox" checked={uForm.roles.includes(r)}
+                               onChange={(e) => setUForm({
+                                 ...uForm,
+                                 roles: e.target.checked
+                                   ? [...uForm.roles, r]
+                                   : uForm.roles.filter((x) => x !== r),
+                               })} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
                 </Field>
                 <Field label="Temporary password" hint="At least 12 characters.">
                   <input style={inputStyle} type="password" value={uForm.password} onChange={setU('password')} />

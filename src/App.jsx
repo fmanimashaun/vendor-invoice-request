@@ -10,19 +10,47 @@ import Locations from './components/Locations.jsx';
 import { api, ApiError } from './api.js';
 
 /**
- * Landing tab per role. The client admin owns the vendor rosters and gets
- * a read-only view of the queue; they do not raise requests, so 'new' is not
- * theirs to land on.
+ * Which role context the app opens in.
+ *
+ * A person can hold more than one role — an admin who also raises requests is
+ * ordinary — so the app shows one context at a time and lets them switch. The
+ * last choice is remembered per user; failing that their default_role; failing
+ * that whatever they hold.
+ *
+ * The context is NOT presentation. It lives in the signed session cookie and
+ * the server authorises against it, so acting as a member genuinely cannot
+ * reach an admin route even though the account holds admin — a deliberate
+ * switch is required first. localStorage only remembers which context to ask
+ * for at next sign-in; tampering with it changes nothing, because the switch
+ * itself is a server call that checks the roles actually held.
  */
-const firstTab = (user) =>
-  user.org === 'vendor'   ? 'queue'
-  : user.role === 'admin' ? 'history'
+const CONTEXT_KEY = (user) => `role-context:${user.id}`;
+
+function readContext(user) {
+  try {
+    const saved = localStorage.getItem(CONTEXT_KEY(user));
+    if (saved && user.roles.includes(saved)) return saved;
+  } catch { /* private window, or storage disabled */ }
+  if (user.default_role && user.roles.includes(user.default_role)) return user.default_role;
+  return user.roles[0] ?? null;
+}
+
+function writeContext(user, role) {
+  try { localStorage.setItem(CONTEXT_KEY(user), role); }
+  catch { /* remembering it is a nicety, not a requirement */ }
+}
+
+/** Landing tab for a given context. */
+const firstTab = (user, context) =>
+  user.org === 'vendor' ? 'queue'
+  : context === 'admin' ? 'history'
   : 'new';
 
 export default function App() {
   const [boot, setBoot]       = useState(null);   // { user, feeKobo, config }
   const [requests, setRequests] = useState([]);
   const [tab, setTab]         = useState(null);
+  const [context, setContext] = useState(null);   // active role context
   const [loading, setLoading] = useState(true);
   const [fatal, setFatal]     = useState(null);
 
@@ -38,7 +66,16 @@ export default function App() {
     (async () => {
       try {
         const b = await load();
-        setTab(firstTab(b.user));
+        // The server decides what we are acting as; the stored preference is
+        // only consulted when it differs and the role is genuinely held.
+        let ctx = b.user.context;
+        const preferred = readContext(b.user);
+        if (preferred && preferred !== ctx && b.user.roles.includes(preferred)) {
+          await api.switchContext(preferred).catch(() => {});
+          ctx = preferred;
+        }
+        setContext(ctx);
+        setTab(firstTab(b.user, ctx));
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) setBoot(null);
         else setFatal(err?.message || 'Could not load.');
@@ -60,7 +97,9 @@ export default function App() {
   if (!boot)   return <Login onDone={async () => {
     setLoading(true);
     const b = await load();
-    setTab(firstTab(b.user));
+    const ctx = b.user.context;
+    setContext(ctx);
+    setTab(firstTab(b.user, ctx));
     setLoading(false);
   }} />;
 
@@ -68,13 +107,20 @@ export default function App() {
   const isVendor = user.org === 'vendor';
   const pendingCount = requests.filter((r) => r.status === 'pending').length;
 
-  const clientAdmin = user.org === 'client' && user.role === 'admin';
+  const acting = context ?? user.roles[0];
+  const clientAdmin = user.org === 'client' && acting === 'admin';
+
+  function switchContext(next) {
+    setContext(next);
+    writeContext(user, next);
+    setTab(firstTab(user, next));
+  }
 
   const tabs = isVendor
     ? [
         ['queue',   pendingCount ? `Open queue (${pendingCount})` : 'Open queue'],
         ['history', 'Approved by us'],
-        ...(user.role === 'admin' ? [['config', 'Settings']] : []),
+        ...(acting === 'admin' ? [['config', 'Settings']] : []),
       ]
     : clientAdmin
       ? [['history', 'Requests'], ['vendors', 'Vendors & users'], ['locations', 'Settings']]
@@ -110,6 +156,25 @@ export default function App() {
         </nav>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, color: T.textDim }}>
+          {/* Only worth showing to someone who actually holds more than one. */}
+          {user.roles.length > 1 && (
+            <select
+              value={acting}
+              onChange={(e) => switchContext(e.target.value)}
+              title="Switch role context"
+              style={{
+                background: T.panelAlt, color: T.text, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: '5px 9px', font: `600 12px ${FONT}`, cursor: 'pointer',
+              }}
+            >
+              {user.roles.map((r) => (
+                <option key={r} value={r}>
+                  {r === 'admin' ? 'Administration' : r === 'member' ? 'Requests'
+                    : r === 'approver' ? 'Approvals' : r}
+                </option>
+              ))}
+            </select>
+          )}
           <span>
             {user.full_name}
             <span style={{
@@ -138,7 +203,7 @@ export default function App() {
           <Queue requests={requests} me={user} onChanged={refresh} />
         )}
         {tab === 'history' && (
-          <History requests={requests} me={user} onChanged={refresh} />
+          <History requests={requests} me={user} acting={acting} onChanged={refresh} />
         )}
         {tab === 'vendors' && <Vendors />}
         {tab === 'locations' && (
@@ -209,7 +274,7 @@ function Login({ onDone }) {
           Vendor<span style={{ color: T.blue }}>Invoice</span>
         </h1>
         <p style={{ color: T.textDim, fontSize: 14, margin: '0 0 22px' }}>
-          Vendor sign-in
+          Sign in
         </p>
 
         {methods?.password && (
@@ -235,7 +300,7 @@ function Login({ onDone }) {
         {methods?.sso && (
         <div style={{ textAlign: 'center', marginTop: 4 }}>
           <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 10px' }}>
-            Staff sign-in
+            {methods.clientPassword === false ? 'Staff sign in here' : 'Staff'}
           </p>
           {/* Full page navigation, not fetch: Cloudflare Access needs to
               redirect the browser to the identity provider and back. Which

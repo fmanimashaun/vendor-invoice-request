@@ -160,6 +160,29 @@ export async function verifyAccessJwt(token, { teamDomain, aud }) {
  * Resolve the caller to a users row, or null.
  * Access is tried first so client staff never see a password box.
  */
+/**
+ * The role context this request is acting in.
+ *
+ * Holding a role is not the same as using it. A person with both `admin` and
+ * `member` operates in ONE of them at a time, and the server authorises
+ * against that, not against everything they could do. Switching is explicit
+ * (POST /api/auth/context) and re-mints the cookie.
+ *
+ * The point is blast radius. In member context, a stolen session, a CSRF, or a
+ * script running on the page cannot reach vendor onboarding or sign-on
+ * settings at all — those need a deliberate switch first.
+ *
+ * The value is only ever trusted after checking it against the roles the
+ * account actually holds, so a stale cookie from before a demotion is
+ * downgraded rather than honoured.
+ */
+export function resolveContext(user, wanted) {
+  const held = String(user.roles || '').split(',').map((r) => r.trim()).filter(Boolean);
+  if (wanted && held.includes(wanted)) return wanted;
+  if (user.default_role && held.includes(user.default_role)) return user.default_role;
+  return held[0] ?? null;
+}
+
 export async function authenticate(request, env) {
   const accessToken = request.headers.get('Cf-Access-Jwt-Assertion');
   if (accessToken && env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
@@ -171,9 +194,11 @@ export async function authenticate(request, env) {
       const user = await env.DB.prepare(
         `SELECT * FROM users WHERE email = ?1 AND status = 'active'`,
       ).bind(String(claims.email).toLowerCase()).first();
-      // No row means no access. We never auto-provision — otherwise every
-      // client employee could raise funding requests.
-      return user ? { user, via: 'access' } : null;
+      // No row means no access here; provisioning happens on the SSO landing
+      // route, which is the only place a first sign-in is handled.
+      if (!user) return null;
+      user.ctx = resolveContext(user, null);
+      return { user, via: 'access' };
     }
   }
 
@@ -187,7 +212,9 @@ export async function authenticate(request, env) {
          FROM users u LEFT JOIN vendors v ON v.id = u.vendor_id
         WHERE u.id = ?1 AND u.status = 'active'`,
     ).bind(session.uid).first();
-    return user ? { user, via: 'password' } : null;
+    if (!user) return null;
+    user.ctx = resolveContext(user, session.ctx);
+    return { user, via: 'password' };
   }
 
   return null;

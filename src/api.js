@@ -33,6 +33,7 @@ export const api = {
   me:          ()               => call('/me'),
   login:       (email, password) => call('/auth/login', { method: 'POST', body: { email, password } }),
   logout:      ()               => call('/auth/logout', { method: 'POST' }),
+  switchContext: (role)         => call('/auth/context', { method: 'POST', body: { role } }),
 
   requests:    (status)         => call(`/requests${status ? `?status=${status}` : ''}`),
   createRequest: (payload)      => call('/requests', { method: 'POST', body: payload }),
@@ -44,6 +45,8 @@ export const api = {
   saveConfig:  (cfg)            => call('/config', { method: 'PUT', body: cfg }),
   reference:   ()               => call('/reference'),
   fonts:       ()               => call('/fonts'),
+  ssoConfig:   ()               => call('/sso-config'),
+  saveSsoConfig: (c)            => call('/sso-config', { method: 'PUT', body: c }),
   deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),
   vendorTemplate: (id)          => call(`/vendors/${id}/template`),
   saveVendorTemplate: (id, t)   => call(`/vendors/${id}/template`, { method: 'PUT', body: { template: t } }),
@@ -65,6 +68,7 @@ export const api = {
   setVendorStatus: (id, status) => call(`/vendors/${id}/status`, { method: 'POST', body: { status } }),
 
   users:       (vendorId)       => call(`/users${vendorId ? `?vendor_id=${vendorId}` : ''}`),
+  clientUsers: ()               => call('/users?org=client'),
   createUser:  (u)              => call('/users', { method: 'POST', body: u }),
   setUserStatus: (id, status)   => call(`/users/${id}/status`, { method: 'POST', body: { status } }),
 

@@ -6,7 +6,7 @@ import { shareInvoice, canShareFiles } from '../shareInvoice.js';
 import { naira, downloadName } from '../../shared/reference.js';
 
 /** Decided and in-flight requests. The client sees its own; a vendor sees what it decided. */
-export default function History({ requests, me, onChanged }) {
+export default function History({ requests, me, acting, onChanged }) {
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
 
@@ -28,7 +28,7 @@ export default function History({ requests, me, onChanged }) {
 
   return (
     <Card title={me.org === 'vendor' ? 'Approved by us'
-                 : me.role === 'admin' ? 'All requests' : 'My requests'}>
+                 : acting === 'admin' ? 'All requests' : 'My requests'}>
       <Banner onClose={() => setError(null)}>{error}</Banner>
       <Table
         head={['Request', 'Invoice', 'For', 'Type', 'Period', { label: 'Total', right: true }, 'Status', '']}

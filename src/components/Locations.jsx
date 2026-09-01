@@ -26,6 +26,8 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
   const [fee, setFee]       = useState(String((feeKobo ?? 0) / 100));
   const [org, setOrg]       = useState(orgName ?? '');
   const [fonts, setFonts]   = useState([]);
+  const [ssoCfg, setSsoCfg] = useState(null);
+  const [sso, setSso]       = useState({ team_domain: '', aud: '', allowed_domains: '', enabled: false });
   const [font, setFont]     = useState({ key: '', name: '', kind: 'sans', metric_of: '' });
   const [fontFiles, setFontFiles] = useState({ regular: null, bold: null });
   const [busy, setBusy]     = useState(false);
@@ -37,6 +39,12 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
     try {
       setRef(await api.reference());
       setFonts((await api.fonts()).fonts || []);
+      const cfg = await api.ssoConfig();
+      setSsoCfg(cfg);
+      setSso({
+        team_domain: cfg.teamDomain || '', aud: cfg.aud || '',
+        allowed_domains: cfg.allowedDomains || '', enabled: !!cfg.enabled,
+      });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load locations.');
       setRef({ businessUnits: [], sites: [], buSites: {} });
@@ -101,6 +109,17 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
       setFont({ key: '', name: '', kind: 'sans', metric_of: '' });
       setFontFiles({ regular: null, bold: null });
       return `${made.name} added and available to every vendor.`;
+    });
+  };
+
+  const saveSso = (e) => {
+    e.preventDefault();
+    run(async () => {
+      const cfg = await api.saveSsoConfig(sso);
+      setSsoCfg(cfg);
+      return cfg.enabled
+        ? 'Single sign-on is on. Staff passwords keep working until someone signs in with it successfully.'
+        : 'Single sign-on is off. Staff sign in with a password.';
     });
   };
 
@@ -286,6 +305,62 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
             </tbody>
           </table>
         </div>
+      </Card>
+
+      <Card title="Staff single sign-on">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 6px', lineHeight: 1.5 }}>
+          Optional. Until it is set up, your staff sign in with a password.
+          Vendors always use a password — they are not in your directory — so
+          this only ever affects your own people.
+        </p>
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
+          Switching it on does <strong style={{ color: T.text }}>not</strong> cut
+          passwords off straight away. That happens automatically the first time
+          somebody actually completes a sign-on, so a wrong setting cannot lock
+          you out of your own admin.
+        </p>
+
+        {ssoCfg && (
+          <div style={{
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: '10px 13px',
+            marginBottom: 16, fontSize: 13, color: T.textDim, lineHeight: 1.6,
+          }}>
+            <div>Single sign-on: <strong style={{ color: ssoCfg.enabled ? T.green : T.textDim }}>
+              {ssoCfg.enabled ? 'on' : 'off'}</strong></div>
+            <div>Proven to work: <strong style={{ color: ssoCfg.verified ? T.green : T.amber }}>
+              {ssoCfg.verified ? `yes, ${ssoCfg.verifiedAt}` : 'not yet'}</strong></div>
+            <div>Staff password sign-in: <strong style={{ color: ssoCfg.clientPassword ? T.amber : T.green }}>
+              {ssoCfg.clientPassword ? 'still available' : 'disabled'}</strong></div>
+          </div>
+        )}
+
+        <form onSubmit={saveSso}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: '0 16px' }}>
+            <Field label="Team domain" hint="From Cloudflare Zero Trust.">
+              <input style={inputStyle} value={sso.team_domain}
+                     onChange={(e) => setSso({ ...sso, team_domain: e.target.value })}
+                     placeholder="yourteam.cloudflareaccess.com" />
+            </Field>
+            <Field label="Application AUD tag" hint="From the Access application.">
+              <input style={inputStyle} value={sso.aud}
+                     onChange={(e) => setSso({ ...sso, aud: e.target.value })} />
+            </Field>
+            <Field label="Allowed email domains"
+                   hint="Comma separated. Only these get an account on first sign-in.">
+              <input style={inputStyle} value={sso.allowed_domains}
+                     onChange={(e) => setSso({ ...sso, allowed_domains: e.target.value })}
+                     placeholder="yourcompany.com" />
+            </Field>
+          </div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 16px', fontSize: 14 }}>
+            <input type="checkbox" checked={sso.enabled}
+                   onChange={(e) => setSso({ ...sso, enabled: e.target.checked })} />
+            Offer single sign-on on the login screen
+          </label>
+          <button type="submit" disabled={busy} style={button('primary', busy)}>
+            Save sign-on settings
+          </button>
+        </form>
       </Card>
 
       <Card title="Fonts">

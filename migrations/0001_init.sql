@@ -79,7 +79,20 @@ CREATE TABLE IF NOT EXISTS users (
   full_name     TEXT NOT NULL,
   org           TEXT NOT NULL CHECK (org IN ('client','vendor')),
   vendor_id     INTEGER REFERENCES vendors(id),
-  role          TEXT NOT NULL CHECK (role IN ('requester','approver','admin')),
+  -- A SET of roles, comma separated, because one person legitimately holds
+  -- more than one: an admin who also raises requests is ordinary, and forcing
+  -- a choice would mean giving them two accounts.
+  --
+  --   client staff  member | admin
+  --   vendor staff  approver | admin
+  --
+  -- Stored as text rather than a join table: there are four values, they never
+  -- change, and every check is "does this set contain X".
+  roles         TEXT NOT NULL DEFAULT 'member',
+  -- Which of those roles the app opens in. A convenience only: the server
+  -- authorises on `roles`, never on whichever context the client is showing,
+  -- so switching context can neither grant nor remove anything.
+  default_role  TEXT,
   -- Vendor accounts are created by hand and carry the details that appear in
   -- the signature block of any invoice this person approves. client rows are
   -- provisioned by SSO on first sign-in and leave these NULL.
@@ -119,6 +132,23 @@ CREATE TABLE IF NOT EXISTS config (
   -- the UI; nothing about a particular company is compiled into the code.
   org_name          TEXT NOT NULL DEFAULT '',
   default_fee_kobo  INTEGER NOT NULL DEFAULT 10000,   -- minor units
+
+  -- Single sign-on for CLIENT staff, set up in the app rather than at deploy
+  -- time so a deployment can start with passwords and move to SSO later.
+  -- Vendors always use email and password; they are not in the client's
+  -- directory and never will be.
+  sso_enabled         INTEGER NOT NULL DEFAULT 0 CHECK (sso_enabled IN (0,1)),
+  access_team_domain  TEXT,
+  access_aud          TEXT,
+  sso_allowed_domains TEXT,
+  -- Set the first time a client user actually completes an SSO sign-in.
+  --
+  -- Password sign-in for client staff is disabled only once this is set, not
+  -- when the switch is flipped. Turning SSO on with a wrong AUD tag would
+  -- otherwise lock out the only admin who could turn it back off, and there is
+  -- no way back into the app from there. Configure, prove it works, and the
+  -- cutover happens on its own.
+  sso_verified_at     TEXT,
   updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
   updated_by        TEXT NOT NULL DEFAULT 'seed'
 );

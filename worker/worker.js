@@ -12,7 +12,7 @@
 //      rejected request cannot leave a gap in the issued sequence.
 
 import {
-  authenticate, hashPassword, verifyPassword, verifyAccessJwt,
+  authenticate, resolveContext, hashPassword, verifyPassword, verifyAccessJwt,
   signSession, sessionCookie,
 } from './auth.js';
 import { renderInvoice } from './renderInvoice.js';
@@ -108,6 +108,11 @@ async function route(request, env, url) {
   if (!auth) return fail('unauthenticated', 'Sign in to continue.', 401);
   const me = auth.user;
 
+  if (path === '/api/auth/context' && method === 'POST') {
+    const me = await authenticate(request, env);
+    if (!me) return fail('unauthorised', 'Sign in first.', 401);
+    return switchContext(request, env, me.user);
+  }
   if (path === '/api/auth/logout' && method === 'POST') {
     return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie('', { clear: true }) });
   }
@@ -165,6 +170,8 @@ async function route(request, env, url) {
     return upsertBu(request, env, me, m[1]);
   if (path === '/api/bu-sites' && method === 'POST')  return linkBuSite(request, env, me);
   if (path === '/api/platform-config' && method === 'PUT') return updatePlatformConfig(request, env, me);
+  if (path === '/api/sso-config' && method === 'GET')  return getSsoConfig(env, me);
+  if (path === '/api/sso-config' && method === 'PUT')  return putSsoConfig(request, env, me);
 
   if (path === '/api/fonts' && method === 'GET')   return listFonts(env, me);
   if (path === '/api/fonts' && method === 'POST')  return uploadFont(request, env, me);
@@ -189,7 +196,10 @@ async function route(request, env, url) {
 }
 
 const publicUser = (u) => ({
-  id: u.id, email: u.email, full_name: u.full_name, org: u.org, role: u.role,
+  id: u.id, email: u.email, full_name: u.full_name, org: u.org,
+  roles: splitRoles(u.roles),
+  default_role: u.default_role || splitRoles(u.roles)[0] || null,
+  context: u.ctx ?? null,
   vendor_id: u.vendor_id, vendor_name: u.vendor_name, vendor_code: u.vendor_code,
   job_title: u.job_title, phone: u.phone,
   status: u.status, created_at: u.created_at, created_by: u.created_by,
@@ -198,8 +208,37 @@ const publicUser = (u) => ({
 const requireOrg = (me, org) =>
   me.org === org ? null : fail('forbidden', `Only ${org} users may do this.`, 403);
 
-const requireRole = (me, ...roles) =>
-  roles.includes(me.role) ? null : fail('forbidden', 'Your role does not allow this.', 403);
+/** 'admin,member' -> ['admin','member']. Tolerates spacing and empties. */
+const splitRoles = (v) =>
+  String(v || '').split(',').map((r) => r.trim()).filter(Boolean);
+
+const hasRole = (u, ...want) => {
+  const held = splitRoles(u?.roles);
+  return want.some((r) => held.includes(r));
+};
+
+/**
+ * Passes when the caller is ACTING IN one of the named roles.
+ *
+ * Deliberately stricter than "holds the role". Someone with both admin and
+ * member has to switch context before doing the other job, which keeps a
+ * session scoped to one set of powers at a time. `hasRole` is what the error
+ * message uses to tell the two failures apart, because "switch context" and
+ * "you do not have this role" are very different problems for the user.
+ */
+const requireRole = (me, ...roles) => {
+  if (roles.includes(me.ctx)) return null;
+  if (hasRole(me, ...roles)) {
+    return fail('wrong_context',
+      `You hold this role but are acting as ${me.ctx}. Switch to `
+      + `${roles.filter((r) => hasRole(me, r)).join(' or ')} first.`,
+      403, { need: roles, acting: me.ctx });
+  }
+  return fail('forbidden', 'Your role does not allow this.', 403);
+};
+
+const CLIENT_ROLES = ['member', 'admin'];
+const VENDOR_ROLES = ['approver', 'admin'];
 
 // ── Auth ──────────────────────────────────────────────────────────────
 
@@ -215,29 +254,75 @@ const requireRole = (me, ...roles) =>
  * would return 503. Either method can be turned off explicitly; turning both
  * off would lock everyone out, so that is refused.
  */
+/**
+ * How sign-in is configured, resolved once so the login screen, the login route
+ * and the SSO landing all agree.
+ *
+ * Configuration lives in the database, with the wrangler vars as a fallback for
+ * a deployment that set them before this existed.
+ *
+ * The cutover is deliberately two-stage. `sso_enabled` says an admin has set
+ * SSO up; `sso_verified_at` says somebody has actually completed a sign-in with
+ * it. Client passwords stop working only when BOTH are true. Flipping a switch
+ * with a mistyped AUD tag would otherwise lock out the only person who could
+ * unflip it, and there is no route back in.
+ */
+async function authConfig(env) {
+  const cfg = await env.DB.prepare('SELECT * FROM config WHERE id = 1').first();
+  const teamDomain = cfg?.access_team_domain || env.ACCESS_TEAM_DOMAIN || null;
+  const aud = cfg?.access_aud || env.ACCESS_AUD || null;
+  const configured = !!(teamDomain && aud);
+  const enabled = !!cfg?.sso_enabled && configured;
+  const verified = !!cfg?.sso_verified_at;
+
+  return {
+    teamDomain,
+    aud,
+    allowedDomains: cfg?.sso_allowed_domains || env.SSO_ALLOWED_DOMAINS || '',
+    ssoConfigured: configured,
+    ssoEnabled: enabled,
+    ssoVerified: verified,
+    // Vendors are never in the client's directory, so their password sign-in
+    // is not something SSO can replace.
+    clientPassword: !(enabled && verified),
+    vendorPassword: true,
+    verifiedAt: cfg?.sso_verified_at || null,
+  };
+}
+
+/**
+ * Move this session into another role the account holds.
+ *
+ * A new cookie is minted rather than a flag flipped somewhere: the context has
+ * to be inside the signed session or it is not a boundary, just a suggestion
+ * the client could ignore.
+ */
+async function switchContext(request, env, user) {
+  const b = await request.json().catch(() => ({}));
+  const want = String(b.role || '');
+  if (!hasRole(user, want)) {
+    return fail('forbidden', 'You do not hold that role.', 403,
+      { roles: splitRoles(user.roles) });
+  }
+  const token = await signSession({ uid: user.id, ctx: want }, env.SESSION_SECRET);
+  user.ctx = want;
+  console.warn('CONTEXT_SWITCHED', user.email, want);
+  return json({ user: publicUser(user) }, 200, { 'Set-Cookie': sessionCookie(token) });
+}
+
 async function authMethods(env) {
-  const accessConfigured = !!(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD);
-  const flag = (v, dflt) => (v === undefined || v === '' ? dflt : String(v) !== 'false');
-
-  let sso = flag(env.AUTH_SSO_ENABLED, true) && accessConfigured;
-  let password = flag(env.AUTH_PASSWORD_ENABLED, true);
-  if (!sso && !password) password = true;   // never lock everyone out
-
+  const a = await authConfig(env);
   return json({
-    sso,
-    password,
+    sso: a.ssoEnabled,
+    password: true,                       // vendors always; client until cutover
+    clientPassword: a.clientPassword,
     ssoLabel: String(env.SSO_BUTTON_LABEL || 'Sign in with single sign-on'),
-    ssoConfigured: accessConfigured,
+    ssoConfigured: a.ssoConfigured,
   });
 }
 
 async function login(request, env) {
-  // A check in React is not a control: if password sign-in is turned off for
-  // this deployment, the route has to refuse too.
-  if (String(env.AUTH_PASSWORD_ENABLED) === 'false'
-      && env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
-    return fail('password_login_disabled', 'Password sign-in is disabled for this deployment.', 403);
-  }
+  const auth = await authConfig(env);
   const { email, password } = await request.json().catch(() => ({}));
   if (!email || !password) return fail('bad_request', 'Email and password are required.');
 
@@ -247,12 +332,23 @@ async function login(request, env) {
       WHERE u.email = ?1 AND u.status = 'active'`,
   ).bind(String(email).toLowerCase().trim()).first();
 
-  // Same response whether the user is absent, disabled, SSO-only, or the
-  // password is wrong — no account enumeration.
-  const ok = user && user.org === 'vendor' && (await verifyPassword(password, user));
+  // Client staff may use a password until SSO is both set up and proven to
+  // work; after that their only way in is the identity provider. Vendors are
+  // unaffected either way. A check in React is not a control, so the decision
+  // is made here.
+  if (user?.org === 'client' && !auth.clientPassword) {
+    return fail('password_login_disabled',
+      'Staff sign-in uses single sign-on. Use the sign-in button instead.', 403);
+  }
+
+  // Same response whether the user is absent, disabled, has no password set, or
+  // the password is wrong — no account enumeration.
+  const ok = user && (await verifyPassword(password, user));
   if (!ok) return fail('bad_credentials', 'Email or password is incorrect.', 401);
 
-  const token = await signSession({ uid: user.id }, env.SESSION_SECRET);
+  const ctx = resolveContext(user, null);
+  const token = await signSession({ uid: user.id, ctx }, env.SESSION_SECRET);
+  user.ctx = ctx;
   return json({ user: publicUser(user) }, 200, { 'Set-Cookie': sessionCookie(token) });
 }
 
@@ -266,8 +362,12 @@ async function login(request, env) {
  * outside Access — which is what leaves the vendor password login reachable.
  */
 async function ssoLanding(request, env) {
-  if (String(env.AUTH_SSO_ENABLED) === 'false') {
-    return fail('sso_disabled', 'Single sign-on is disabled for this deployment.', 403);
+  const auth = await authConfig(env);
+  if (!auth.ssoEnabled) {
+    return fail('sso_disabled',
+      auth.ssoConfigured
+        ? 'Single sign-on is set up but not switched on yet.'
+        : 'Single sign-on has not been configured for this deployment.', 403);
   }
   const token = request.headers.get('Cf-Access-Jwt-Assertion');
 
@@ -281,13 +381,9 @@ async function ssoLanding(request, env) {
       503,
     );
   }
-  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) {
-    return fail('access_not_configured', 'ACCESS_TEAM_DOMAIN and ACCESS_AUD are not set.', 503);
-  }
-
   const claims = await verifyAccessJwt(token, {
-    teamDomain: env.ACCESS_TEAM_DOMAIN,
-    aud: env.ACCESS_AUD,
+    teamDomain: auth.teamDomain,
+    aud: auth.aud,
   });
   if (!claims) return fail('bad_access_token', 'Could not verify the Access token.', 401);
 
@@ -296,7 +392,7 @@ async function ssoLanding(request, env) {
   // Open provisioning: Access has already authenticated this person against
   // the client's IdP and the Access policy decides who may reach this route, so
   // a first sign-in creates the account. Always client/requester.
-  const resolved = await resolveOrProvisionSsoUser(env, claims);
+  const resolved = await resolveOrProvisionSsoUser(env, claims, auth.allowedDomains);
   if (!resolved.user) {
     return new Response(noAccessPage(email, resolved.denied), {
       status: 403,
@@ -313,7 +409,18 @@ async function ssoLanding(request, env) {
   ).bind(user.id, String(claims.idp?.type || 'access'), String(claims.sub || email)).run()
     .catch(() => { /* table is optional; identity logging is not critical path */ });
 
-  const session = await signSession({ uid: user.id }, env.SESSION_SECRET);
+  // The first completed sign-in is what retires password access for client
+  // staff. Recording it here, after a verified token has resolved to a real
+  // active user, is the only point at which SSO is known to work end to end.
+  if (!auth.ssoVerified) {
+    await env.DB.prepare(
+      "UPDATE config SET sso_verified_at = datetime('now') WHERE id = 1 AND sso_verified_at IS NULL",
+    ).run();
+    console.warn('SSO_VERIFIED', email);
+  }
+
+  const session = await signSession(
+    { uid: user.id, ctx: resolveContext(user, null) }, env.SESSION_SECRET);
   return new Response(null, {
     status: 302,
     headers: { Location: '/', 'Set-Cookie': sessionCookie(session) },
@@ -347,8 +454,8 @@ const noAccessPage = (email, reason) => `<!doctype html>
  * IdPs. Setting it is defence in depth: if the Access policy is ever widened by
  * accident, this still refuses to mint accounts for outside addresses.
  */
-function ssoDomainAllowed(email, env) {
-  const raw = String(env.SSO_ALLOWED_DOMAINS || '').trim();
+function ssoDomainAllowed(email, env, configured) {
+  const raw = String(configured ?? env.SSO_ALLOWED_DOMAINS ?? '').trim();
   if (!raw) return true;
   const domain = email.slice(email.lastIndexOf('@') + 1);
   return raw.split(',').map((d) => d.trim().toLowerCase()).filter(Boolean).includes(domain);
@@ -364,7 +471,7 @@ function ssoDomainAllowed(email, env) {
  *
  * A disabled account is not resurrected by signing in again.
  */
-export async function resolveOrProvisionSsoUser(env, claims) {
+export async function resolveOrProvisionSsoUser(env, claims, allowedDomains) {
   const email = String(claims?.email || '').toLowerCase().trim();
   if (!email) return { denied: 'no_email' };
 
@@ -375,14 +482,14 @@ export async function resolveOrProvisionSsoUser(env, claims) {
     return existing.status === 'active' ? { user: existing } : { denied: 'disabled' };
   }
 
-  if (!ssoDomainAllowed(email, env)) return { denied: 'domain' };
+  if (!ssoDomainAllowed(email, env, allowedDomains)) return { denied: 'domain' };
 
   const fullName = String(claims.name || claims.given_name || email.split('@')[0]).slice(0, 120);
 
   try {
     const user = await env.DB.prepare(
-      `INSERT INTO users (email, full_name, org, role, created_by)
-       VALUES (?1, ?2, 'client', 'requester', 'sso:auto') RETURNING *`,
+      `INSERT INTO users (email, full_name, org, roles, created_by)
+       VALUES (?1, ?2, 'client', 'member', 'sso:auto') RETURNING *`,
     ).bind(email, fullName).first();
     console.warn('USER_AUTOPROVISIONED', email);
     return { user };
@@ -604,6 +711,60 @@ async function updatePlatformConfig(request, env, me) {
  * admin uploaded. Readable by any signed-in user so the onboarding form and a
  * vendor's own settings screen can both offer the list.
  */
+/**
+ * Single sign-on for client staff, configured in the app.
+ *
+ * Kept out of wrangler.toml on purpose: a deployment should be able to start
+ * on passwords and adopt SSO later without a redeploy, and the person who sets
+ * it up is an admin rather than whoever holds the deploy credentials.
+ */
+async function getSsoConfig(env, me) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+  const a = await authConfig(env);
+  return json({
+    enabled: a.ssoEnabled,
+    configured: a.ssoConfigured,
+    verified: a.ssoVerified,
+    verifiedAt: a.verifiedAt,
+    teamDomain: a.teamDomain,
+    aud: a.aud,
+    allowedDomains: a.allowedDomains,
+    clientPassword: a.clientPassword,
+  });
+}
+
+async function putSsoConfig(request, env, me) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  const b = await request.json().catch(() => ({}));
+  const teamDomain = String(b.team_domain || '').trim();
+  const aud = String(b.aud || '').trim();
+  const domains = String(b.allowed_domains || '').trim();
+  const enabled = b.enabled === true;
+
+  if (teamDomain && !/^[a-z0-9-]+\.cloudflareaccess\.com$/i.test(teamDomain)) {
+    return fail('bad_request',
+      'team_domain looks like "yourteam.cloudflareaccess.com".');
+  }
+  // Switching it on without both values would present users a button that can
+  // only ever fail.
+  if (enabled && !(teamDomain && aud)) {
+    return fail('bad_request',
+      'Set the team domain and the application AUD tag before switching SSO on.');
+  }
+
+  await env.DB.prepare(
+    `UPDATE config SET sso_enabled = ?1, access_team_domain = ?2, access_aud = ?3,
+            sso_allowed_domains = ?4, updated_at = datetime('now'), updated_by = ?5
+      WHERE id = 1`,
+  ).bind(enabled ? 1 : 0, teamDomain || null, aud || null, domains || null, me.email).run();
+
+  console.warn('SSO_CONFIG_CHANGED', me.email, enabled ? 'enabled' : 'disabled');
+  return getSsoConfig(env, me);
+}
+
 async function listFonts(env, me) {
   const { results } = await env.DB.prepare('SELECT * FROM fonts ORDER BY name').all();
   const custom = (results || []).map((f) => ({
@@ -830,7 +991,7 @@ async function setVendorStatus(request, env, me, id) {
  * onboarding extraction rather than hand-edited in normal operation.
  */
 async function getVendorTemplate(env, me, id) {
-  const mine = me.org === 'vendor' && me.vendor_id === id && me.role === 'admin';
+  const mine = me.org === 'vendor' && me.vendor_id === id && hasRole(me, 'admin');
   if (!mine) {
     const denied = requireRosterAdmin(me);
     if (denied) return denied;
@@ -895,12 +1056,13 @@ async function listUsers(env, me, url) {
   if (denied) return denied;
 
   const vendorId = Number(url?.searchParams?.get('vendor_id')) || null;
+  const org = url?.searchParams?.get('org') === 'client' ? 'client' : 'vendor';
   const { results } = await env.DB.prepare(
     `SELECT u.*, v.name AS vendor_name, v.code AS vendor_code
-       FROM users u JOIN vendors v ON v.id = u.vendor_id
-      WHERE u.org = 'vendor' AND (?1 IS NULL OR u.vendor_id = ?1)
+       FROM users u LEFT JOIN vendors v ON v.id = u.vendor_id
+      WHERE u.org = ?2 AND (?1 IS NULL OR u.vendor_id = ?1)
       ORDER BY v.name, u.status, u.full_name`,
-  ).bind(vendorId).all();
+  ).bind(vendorId, org).all();
   return json({ users: (results || []).map(publicUser) });
 }
 
@@ -915,39 +1077,67 @@ async function createUser(request, env, me) {
   // Name, job title, email and phone are all required: they are copied onto
   // every invoice this person approves, so an account with them missing would
   // produce a document with a blank signature block.
-  const vendorId = Number(b.vendor_id);
-  if (!email || !b.full_name || !b.role || !jobTitle || !phone) {
-    return fail('bad_request', 'email, full_name, job_title, phone and role are required.');
+  const org = String(b.org || 'vendor');
+  if (!['client', 'vendor'].includes(org)) {
+    return fail('bad_request', "org must be 'client' or 'vendor'.");
   }
-  // client rows are never created here; SSO does that on first sign-in.
-  if (b.org && b.org !== 'vendor') {
-    return fail('bad_request', 'Only vendor accounts are created here. client users are provisioned by SSO on first sign-in.');
-  }
-  if (!Number.isInteger(vendorId)) {
-    return fail('bad_request', 'vendor_id is required: a vendor user must belong to a vendor.');
-  }
-  const vendor = await env.DB.prepare(
-    `SELECT * FROM vendors WHERE id = ?1 AND status = 'active'`,
-  ).bind(vendorId).first();
-  if (!vendor) return fail('bad_request', 'No such active vendor.');
-  if (!['requester', 'approver', 'admin'].includes(b.role)) {
-    return fail('bad_request', 'role must be requester, approver or admin.');
+  // Accepts `roles: ['admin','member']` or a single `role` for convenience.
+  const roles = [...new Set(
+    (Array.isArray(b.roles) ? b.roles : splitRoles(b.roles || b.role)).map(String),
+  )];
+  if (!email || !b.full_name || !roles.length) {
+    return fail('bad_request', 'email, full_name and at least one role are required.');
   }
 
+  // A vendor user's job title and phone are printed in the signature block of
+  // every invoice they approve, so they are required. Client staff never
+  // appear on the document, so theirs are optional.
+  let vendorId = null;
+  let vendor = null;
+  if (org === 'vendor') {
+    vendorId = Number(b.vendor_id);
+    if (!jobTitle || !phone) {
+      return fail('bad_request', 'job_title and phone are required for vendor users.');
+    }
+    if (!Number.isInteger(vendorId)) {
+      return fail('bad_request', 'vendor_id is required: a vendor user must belong to a vendor.');
+    }
+    vendor = await env.DB.prepare(
+      `SELECT * FROM vendors WHERE id = ?1 AND status = 'active'`,
+    ).bind(vendorId).first();
+    if (!vendor) return fail('bad_request', 'No such active vendor.');
+  } else if (b.vendor_id) {
+    return fail('bad_request', 'A client user does not belong to a vendor.');
+  }
+  const allowed = org === 'client' ? CLIENT_ROLES : VENDOR_ROLES;
+  const bad = roles.filter((r) => !allowed.includes(r));
+  if (bad.length) {
+    return fail('bad_request',
+      `${org} roles must be ${allowed.join(' or ')}; got ${bad.join(', ')}.`);
+  }
+  // Landing someone in a context they do not hold would show them an empty app.
+  const defaultRole = String(b.default_role || roles[0]);
+  if (!roles.includes(defaultRole)) {
+    return fail('bad_request', `default_role must be one of the roles given (${roles.join(', ')}).`);
+  }
+
+  // Client staff get a password too. Once SSO is set up and proven, it stops
+  // working for them and the identity provider takes over; until then it is
+  // the only way in, and a deployment has to be usable before SSO exists.
   if (!b.password || String(b.password).length < 12) {
-    return fail('bad_request', 'Vendor users need a password of at least 12 characters.');
+    return fail('bad_request', 'A password of at least 12 characters is required.');
   }
   const pw = await hashPassword(String(b.password));
 
   try {
     const r = await env.DB.prepare(
-      `INSERT INTO users (email, full_name, org, vendor_id, role, job_title, phone,
-                          pw_hash, pw_salt, pw_iterations, created_by)
-       VALUES (?1,?2,'vendor',?3,?4,?5,?6,?7,?8,?9,?10) RETURNING *`,
-    ).bind(email, b.full_name, vendorId, b.role, jobTitle, phone,
-           pw.hash, pw.salt, pw.iterations, me.email).first();
-    r.vendor_name = vendor.name;
-    r.vendor_code = vendor.code;
+      `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
+                          pw_hash, pw_salt, pw_iterations, created_by, default_role)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) RETURNING *`,
+    ).bind(email, b.full_name, org, vendorId, roles.join(','), jobTitle || null, phone || null,
+           pw.hash, pw.salt, pw.iterations, me.email, defaultRole).first();
+    r.vendor_name = vendor?.name ?? null;
+    r.vendor_code = vendor?.code ?? null;
     return json({ user: publicUser(r) }, 201);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return fail('duplicate', 'That email already exists.', 409);
@@ -976,12 +1166,28 @@ async function setUserStatus(request, env, me, id) {
 
   const target = await env.DB.prepare('SELECT * FROM users WHERE id = ?1').bind(id).first();
   if (!target) return fail('not_found', 'No such user.', 404);
-  if (target.org !== 'vendor') {
-    return fail('forbidden', 'Only vendor accounts are managed here.', 403);
+  // An admin disabling themselves would leave nobody able to re-enable them.
+  if (target.id === me.id) {
+    return fail('forbidden', 'You cannot disable your own account.', 403);
+  }
+
+  // Nor may the last one go. Client admins own the vendor list, every vendor
+  // roster, the locations and the sign-on settings; with none left active there
+  // is no route back into any of it.
+  if (status === 'disabled' && target.org === 'client' && hasRole(target, 'admin')) {
+    const { c } = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM users
+        WHERE org = 'client' AND status = 'active'
+          AND (',' || roles || ',') LIKE '%,admin,%'`,
+    ).first();
+    if (c <= 1) {
+      return fail('forbidden',
+        'This is the last active administrator. Add another before removing this one.', 403);
+    }
   }
 
   const r = await env.DB.prepare(
-    `UPDATE users SET status = ?1 WHERE id = ?2 AND org = 'vendor'`,
+    'UPDATE users SET status = ?1 WHERE id = ?2',
   ).bind(status, id).run();
   if (!r.meta.changes) return fail('conflict', 'User was not updated.', 409);
 
@@ -1045,9 +1251,10 @@ function decorate(r, ref) {
 }
 
 async function createRequest(request, env, me) {
-  // Requesters only. The client admin's job is the vendor rosters and a
-  // read-only view of the queue; they do not raise requests themselves.
-  const denied = requireOrg(me, 'client') || requireRole(me, 'requester');
+  // Members raise requests. An admin who is not also a member does not: their
+  // job is the vendor rosters and a read-only view of the queue. Holding both
+  // roles is normal and lets one person do both.
+  const denied = requireOrg(me, 'client') || requireRole(me, 'member');
   if (denied) return denied;
 
   const b = await request.json().catch(() => ({}));
@@ -1311,7 +1518,7 @@ async function nextRequestRef(env) {
 }
 
 async function withdrawRequest(env, me, id) {
-  const denied = requireOrg(me, 'client') || requireRole(me, 'requester');
+  const denied = requireOrg(me, 'client') || requireRole(me, 'member');
   if (denied) return denied;
 
   const r = await env.DB.prepare(
