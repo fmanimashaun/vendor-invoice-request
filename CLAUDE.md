@@ -361,12 +361,28 @@ account over.
   not OIDC). Lock the Entra IdP to the client's tenant ID *and* add an Access
   policy on the email domain; accepting the multi-tenant `common` endpoint
   without validating `tid` lets any Microsoft account sign in.
+- **PBKDF2 is capped at 100,000 iterations by the runtime**, not by choice:
+
+      NotSupportedError: Pbkdf2 failed: iteration counts above 100000
+      are not supported (requested 210000)
+
+  That is below current OWASP guidance, so do not read 100,000 as a
+  recommendation — it is the ceiling Workers allows, and bcrypt/argon2 need
+  WASM. **miniflare does not enforce it**, so a higher number passes every test
+  locally and then 500s on the first production sign-in. It did exactly that.
+  There is now an assertion pinning it; if you change it, deploy and sign in
+  before believing it works.
+
+  A hash stored above the ceiling can never be verified — the runtime refuses
+  the derivation rather than returning a wrong answer — so `verifyPassword`
+  detects that case, logs `PASSWORD_HASH_UNVERIFIABLE`, and returns false
+  instead of throwing. Any such account needs an admin reset.
+
 - **Vendors** → email + password, permanently. They are not in the client's
   directory and never will be, so single sign-on does not apply to them and the
   cutover leaves them untouched. A password reset by an admin is their only
   recovery path. MFA is a possible later addition; there is none today. PBKDF2-HMAC-SHA256 via SubtleCrypto
-  (bcrypt/argon2 need WASM in Workers). `PBKDF2_ITERATIONS` in `auth.js` should
-  be re-checked against OWASP guidance periodically; it rises.
+  (bcrypt/argon2 need WASM in Workers). `PBKDF2_ITERATIONS` cannot rise past the runtime ceiling above.
 - **Roles live in D1, never in IdP group claims.** Vendor staff are not in
   the client's directory, and group mapping would let the client's IT grant themselves
   approver rights.

@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import worker, { resolveOrProvisionSsoUser } from '../worker/worker.js';
-import { hashPassword } from '../worker/auth.js';
+import { hashPassword, PBKDF2_ITERATIONS, MAX_PBKDF2_ITERATIONS } from '../worker/auth.js';
 import { D1Shim, KVShim } from './d1-shim.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1039,6 +1039,17 @@ check('two admins: one may remove the other', r.status === 200, JSON.stringify(r
 r = await call(asAdmin2, `/api/users/${admin2}/status`, { method: 'POST', body: { status: 'disabled' } });
 check('the last remaining admin cannot be removed', r.status === 403, JSON.stringify(r.data));
 DB.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('active', rootAdmin.id);
+
+// The Workers runtime refuses PBKDF2 above 100,000 iterations. miniflare does
+// not, so a higher count passes every test here and then fails on the first
+// production sign-in with a 500. That happened; this stops it happening twice.
+check('PBKDF2 iterations are within the platform ceiling',
+  PBKDF2_ITERATIONS <= MAX_PBKDF2_ITERATIONS && MAX_PBKDF2_ITERATIONS === 100000,
+  `${PBKDF2_ITERATIONS} of ${MAX_PBKDF2_ITERATIONS}`);
+check('a hash stored above the ceiling is rejected rather than crashing',
+  (await (await import('../worker/auth.js')).verifyPassword('anything', {
+    pw_hash: 'x', pw_salt: 'y', pw_iterations: 210000, email: 'old@example.com',
+  })) === false);
 
 results.push('\nPassword policy and admin reset');
 

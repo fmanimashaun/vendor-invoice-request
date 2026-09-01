@@ -11,10 +11,24 @@
 // In both cases the IdP proves WHO you are; the users table decides WHAT you
 // may do. Roles are never read from IdP group claims.
 
-const PBKDF2_ITERATIONS = 210_000; // OWASP guidance for PBKDF2-HMAC-SHA256.
-                                   // Re-check this number periodically; it rises.
+// The Workers runtime REFUSES PBKDF2 above 100,000 iterations:
+//
+//   NotSupportedError: Pbkdf2 failed: iteration counts above 100000
+//   are not supported (requested 210000)
+//
+// This is a hard platform ceiling, not a tunable. It is also lower than OWASP's
+// current guidance for PBKDF2-HMAC-SHA256, so do not read 100,000 as a
+// recommendation — it is the most the runtime allows. bcrypt and argon2 would
+// be better and both need WASM in Workers, which is why PBKDF2 is here at all.
+//
+// Note this does NOT reproduce locally: miniflare accepts any count, so a
+// higher number passes every test and then fails on the first production
+// login. If you raise it, deploy and sign in before believing it works.
+const MAX_PBKDF2_ITERATIONS = 100_000;
+const PBKDF2_ITERATIONS = MAX_PBKDF2_ITERATIONS;
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
 export const SESSION_COOKIE = 'session';
+export { PBKDF2_ITERATIONS, MAX_PBKDF2_ITERATIONS };
 
 const enc = new TextEncoder();
 const b64u = (buf) =>
@@ -48,6 +62,13 @@ function sameString(a, b) {
 
 export async function verifyPassword(password, user) {
   if (!user?.pw_hash || !user?.pw_salt || !user?.pw_iterations) return false;
+  // A hash written before the ceiling was known cannot be verified at all —
+  // the runtime refuses the derivation rather than returning a wrong answer.
+  // Say so plainly instead of surfacing a generic 500 on every sign-in.
+  if (user.pw_iterations > MAX_PBKDF2_ITERATIONS) {
+    console.warn('PASSWORD_HASH_UNVERIFIABLE', user.email, user.pw_iterations);
+    return false;
+  }
   const { hash } = await hashPassword(password, user.pw_salt, user.pw_iterations);
   return sameString(hash, user.pw_hash);
 }
