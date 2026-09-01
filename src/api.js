@@ -43,6 +43,16 @@ export const api = {
   invoices:    ()               => call('/invoices'),
   saveConfig:  (cfg)            => call('/config', { method: 'PUT', body: cfg }),
   reference:   ()               => call('/reference'),
+  fonts:       ()               => call('/fonts'),
+  deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),
+  vendorTemplate: (id)          => call(`/vendors/${id}/template`),
+  saveVendorTemplate: (id, t)   => call(`/vendors/${id}/template`, { method: 'PUT', body: { template: t } }),
+  uploadFont:  (form)           => fetch('/api/fonts', { method: 'POST', credentials: 'same-origin', body: form })
+                                     .then(async (r) => {
+                                       const d = await r.json().catch(() => null);
+                                       if (!r.ok) throw new ApiError(d, r.status);
+                                       return d;
+                                     }),
   createSite:  (s)              => call('/sites', { method: 'POST', body: s }),
   updateSite:  (code, s)        => call(`/sites/${code}`, { method: 'PUT', body: s }),
   createBu:    (b)              => call('/business-units', { method: 'POST', body: b }),

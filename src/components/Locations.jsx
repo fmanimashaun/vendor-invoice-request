@@ -25,6 +25,9 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
   const [bu, setBu]         = useState(BLANK_BU);
   const [fee, setFee]       = useState(String((feeKobo ?? 0) / 100));
   const [org, setOrg]       = useState(orgName ?? '');
+  const [fonts, setFonts]   = useState([]);
+  const [font, setFont]     = useState({ key: '', name: '', kind: 'sans', metric_of: '' });
+  const [fontFiles, setFontFiles] = useState({ regular: null, bold: null });
   const [busy, setBusy]     = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [error, setError]   = useState(null);
@@ -33,6 +36,7 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
   const load = useCallback(async () => {
     try {
       setRef(await api.reference());
+      setFonts((await api.fonts()).fonts || []);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load locations.');
       setRef({ businessUnits: [], sites: [], buSites: {} });
@@ -80,6 +84,23 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
       });
       onSaved?.(config);
       return 'Saved.';
+    });
+  };
+
+  const addFont = (e) => {
+    e.preventDefault();
+    run(async () => {
+      const form = new FormData();
+      form.set('key', font.key.trim().toLowerCase());
+      form.set('name', font.name.trim());
+      form.set('kind', font.kind);
+      if (font.metric_of.trim()) form.set('metric_of', font.metric_of.trim());
+      form.set('regular', fontFiles.regular);
+      form.set('bold', fontFiles.bold);
+      const { font: made } = await api.uploadFont(form);
+      setFont({ key: '', name: '', kind: 'sans', metric_of: '' });
+      setFontFiles({ regular: null, bold: null });
+      return `${made.name} added and available to every vendor.`;
     });
   };
 
@@ -265,6 +286,85 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
             </tbody>
           </table>
         </div>
+      </Card>
+
+      <Card title="Fonts">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          Assigned to a vendor during onboarding so their invoice matches their
+          own stationery. Metric-compatible options have the same character
+          widths as the face they stand in for, so line breaks land where the
+          vendor's own document puts them. Everything here is self-hosted;
+          nothing is fetched from a font service when an invoice is rendered.
+        </p>
+        <Table head={['Font', 'Stands in for', 'Kind', 'Source', '']}
+               empty={fonts.length === 0 ? 'No fonts loaded.' : null}>
+          {fonts.map((f) => (
+            <tr key={f.key}>
+              <Td>{f.name} <span style={{ color: T.textDim }}>({f.key})</span></Td>
+              <Td dim>{f.metricOf || '—'}</Td>
+              <Td dim>{f.kind}</Td>
+              <Td dim>{f.builtin ? 'bundled' : 'uploaded'}</Td>
+              <Td right>
+                {!f.builtin && (
+                  <button disabled={busyId === f.key}
+                          onClick={() => run(async () => {
+                            await api.deleteFont(f.key);
+                            setFonts((await api.fonts()).fonts || []);
+                            return `${f.name} removed.`;
+                          }, f.key)}
+                          style={button('ghost', busyId === f.key)}>Remove</button>
+                )}
+              </Td>
+            </tr>
+          ))}
+        </Table>
+
+        <form onSubmit={addFont} style={{ marginTop: 18, borderTop: `1px solid ${T.border}`, paddingTop: 18 }}>
+          <h3 style={{ margin: '0 0 6px', font: `600 14px ${FONT}`, color: T.text }}>
+            Upload a font
+          </h3>
+          <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
+            For stationery the bundled list does not cover. Both weights are
+            required, and each is checked for the characters an invoice needs —
+            a font without the ₦ sign is rejected here, because at render time
+            it would drop the symbol silently rather than fail.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '0 16px' }}>
+            <Field label="Key" hint="Lowercase. Permanent.">
+              <input style={inputStyle} value={font.key}
+                     onChange={(e) => setFont({ ...font, key: e.target.value })} placeholder="housesans" />
+            </Field>
+            <Field label="Name">
+              <input style={inputStyle} value={font.name}
+                     onChange={(e) => setFont({ ...font, name: e.target.value })} placeholder="House Sans" />
+            </Field>
+            <Field label="Kind">
+              <select style={inputStyle} value={font.kind}
+                      onChange={(e) => setFont({ ...font, kind: e.target.value })}>
+                <option value="sans">Sans</option>
+                <option value="serif">Serif</option>
+                <option value="mono">Mono</option>
+              </select>
+            </Field>
+            <Field label="Stands in for" hint="Optional, e.g. Garamond.">
+              <input style={inputStyle} value={font.metric_of}
+                     onChange={(e) => setFont({ ...font, metric_of: e.target.value })} />
+            </Field>
+            <Field label="Regular (.ttf)">
+              <input style={inputStyle} type="file" accept=".ttf,.otf"
+                     onChange={(e) => setFontFiles({ ...fontFiles, regular: e.target.files?.[0] || null })} />
+            </Field>
+            <Field label="Bold (.ttf)">
+              <input style={inputStyle} type="file" accept=".ttf,.otf"
+                     onChange={(e) => setFontFiles({ ...fontFiles, bold: e.target.files?.[0] || null })} />
+            </Field>
+          </div>
+          <button type="submit"
+                  disabled={busy || !font.key || !font.name || !fontFiles.regular || !fontFiles.bold}
+                  style={button('primary', busy || !font.key || !font.name || !fontFiles.regular || !fontFiles.bold)}>
+            Upload font
+          </button>
+        </form>
       </Card>
 
       <Card title="Organisation">

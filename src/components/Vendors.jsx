@@ -9,6 +9,7 @@ const BLANK_VENDOR = {
   bank_account_name: '', bank_account_number: '', bank_name: '',
   fee_kobo: '100', signatory_name: '', signatory_title: '',
   tin: '', vat_rate_pct: '', wht_rate_pct: '', vat_basis: 'invoice',
+  font_family: 'arimo',
 };
 const BLANK_USER = { full_name: '', job_title: '', email: '', phone: '', role: 'approver', password: '' };
 
@@ -25,6 +26,7 @@ const BLANK_USER = { full_name: '', job_title: '', email: '', phone: '', role: '
  */
 export default function Vendors() {
   const [vendors, setVendors] = useState(null);
+  const [fonts, setFonts]     = useState([]);
   const [users, setUsers]     = useState([]);
   const [selected, setSelected] = useState(null);   // vendor id
   const [showNewVendor, setShowNewVendor] = useState(false);
@@ -37,9 +39,11 @@ export default function Vendors() {
 
   const load = useCallback(async () => {
     try {
-      const [{ vendors: vs }, { users: us }] = await Promise.all([api.vendors(), api.users()]);
+      const [{ vendors: vs }, { users: us }, { fonts: fs }] =
+        await Promise.all([api.vendors(), api.users(), api.fonts()]);
       setVendors(vs);
       setUsers(us);
+      setFonts(fs || []);
       setSelected((cur) => cur ?? vs[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load vendors.');
@@ -228,6 +232,17 @@ export default function Vendors() {
               <Field label="WHT %" hint="Withheld by the payer, not added to the total.">
                 <input style={inputStyle} type="number" min="0" max="100" step="0.01"
                        value={vForm.wht_rate_pct} onChange={setV('wht_rate_pct')} placeholder="5" />
+              </Field>
+              <Field label="Invoice font"
+                     hint="Match their stationery. Metric-compatible options keep their line lengths.">
+                <select style={inputStyle} value={vForm.font_family} onChange={setV('font_family')}>
+                  {fonts.map((f) => (
+                    <option key={f.key} value={f.key}>
+                      {f.name}{f.metricOf ? ` — like ${f.metricOf}` : ` (${f.kind})`}
+                      {f.builtin ? '' : ' · uploaded'}
+                    </option>
+                  ))}
+                </select>
               </Field>
               <Field label="Tax applies to"
                      hint="Fee only, where the bill is a pass-through at cost.">

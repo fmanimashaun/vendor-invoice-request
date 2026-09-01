@@ -94,4 +94,8 @@ export class KVShim {
     }
     return new TextDecoder().decode(v);
   }
+  async delete(key) { this.map.delete(key); }
+  async list({ prefix = '' } = {}) {
+    return { keys: [...this.map.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })) };
+  }
 }

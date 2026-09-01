@@ -197,33 +197,55 @@ time. Every figure gets its own line for that reason.
 
 ## Fonts — a real trap
 
-The renderer needs a font containing the Naira glyph **U+20A6**. A font without
-it does not error: pdf-lib embeds it happily and every ₦ silently disappears
-from the document. **Liberation Sans is the classic trap** — metrically
-Arial-compatible, widely recommended, missing the glyph.
+**A font without the Naira glyph U+20A6 does not error.** pdf-lib embeds it
+happily and every ₦ silently disappears from the document. Nobody notices until
+an approved invoice is already in a WhatsApp group. Liberation Sans is the
+classic trap: metrically Arial-compatible, widely recommended, missing the
+glyph — and when the bundled catalogue was first fetched, Caladea, PT Sans and
+PT Serif all failed the same check.
 
-`scripts/check-fonts.mjs` verifies every file before upload and
-`upload-assets.sh` runs it. Do not bypass it.
+Every path that introduces a font therefore verifies it:
 
-Three families are supported, chosen per vendor by `type.family` in their
-template. Each is freely redistributable and metrically matches a face real
-invoices are actually set in, so a vendor's line lengths and page rhythm come
-out close to their own stationery:
+| Path | Guard |
+|---|---|
+| `scripts/fetch-fonts.mjs` | Checks on download; deletes a family that fails rather than leaving it on disk |
+| `scripts/check-fonts.mjs` | Re-checks everything in `assets/fonts/`; run by `upload-assets.sh` and CI |
+| `POST /api/fonts` | Checks both faces in the Worker before storing anything |
 
-| `family` | Font | Metric-compatible with |
+Do not add a font by any route that skips these.
+
+### The catalogue
+
+`shared/fonts.js` lists what ships. Fonts are **self-hosted** — fetched once,
+pushed to KV, served from there — so no third-party font service is in the path
+when an invoice is rendered.
+
+| Key | Font | Stands in for |
 |---|---|---|
-| `sans` | Arimo | Arial, Helvetica |
-| `serif` | Tinos | Times New Roman |
-| `mono` | Cousine | Courier New |
+| `arimo` | Arimo | Arial, Helvetica |
+| `tinos` | Tinos | Times New Roman |
+| `cousine` | Cousine | Courier New |
+| `carlito` | Carlito | Calibri |
+| `lato`, `firasans`, `spectral` | — | house faces, no metric equivalent |
 
-Fonts are shared across vendors and stored in KV **unprefixed**; only artwork
-is namespaced by vendor code. Only the sans pair is required — a template
-asking for a family whose files are absent falls back to sans, because the
-wrong typeface is recoverable and a failed download is not.
+Metric compatibility is what buys fidelity: the same character widths as the
+proprietary face a vendor's stationery was set in, so line breaks and page
+rhythm land where their own document puts them even though the letterforms
+differ.
 
-The extractor picks the family from the sample invoice's own font names. PDF
-font names are usually subset-tagged (`ABCDEF+TimesNewRomanPSMT`), so it
-matches on substrings.
+An admin can upload anything the catalogue misses, through Settings or
+`POST /api/fonts`. Uploaded fonts live in the `fonts` table plus KV under
+`fonts/<key>-Regular.ttf`; bundled keys cannot be overwritten or deleted, and a
+font a vendor is still using cannot be deleted either.
+
+`arimo` is `FALLBACK_FONT`: a template naming a family whose files are absent
+falls back to it rather than failing the download, because the wrong face is
+recoverable and a missing invoice is not.
+
+```bash
+node scripts/fetch-fonts.mjs      # download and verify the catalogue
+./scripts/upload-assets.sh acme   # artwork for one vendor + all shared fonts
+```
 
 ## Layout geometry
 

@@ -11,6 +11,8 @@ test-output.pdf
 # scripts/extract-assets.py and downloaded from Google Fonts. See README.
 assets/*.png
 assets/*.ttf
+assets/fonts/
+assets/*/
 
 # Per-deployment seed data. Copy scripts/seed.example.sql to this and edit it;
 # nothing organisation-specific belongs in the repository.

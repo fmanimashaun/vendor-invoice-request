@@ -16,7 +16,9 @@ import {
   signSession, sessionCookie,
 } from './auth.js';
 import { renderInvoice } from './renderInvoice.js';
-import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE, FONT_FAMILIES } from '../shared/template.js';
+import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE } from '../shared/template.js';
+import { FONT_CATALOGUE, fontKeys, REQUIRED_GLYPHS, FALLBACK_FONT } from '../shared/fonts.js';
+import fontkit from '@pdf-lib/fontkit';
 import {
   REQUEST_TYPES,
   typeFor, numberingSiteIn, invoiceRef, downloadName, siteNameIn, buNameIn, periodLabel,
@@ -163,6 +165,11 @@ async function route(request, env, url) {
     return upsertBu(request, env, me, m[1]);
   if (path === '/api/bu-sites' && method === 'POST')  return linkBuSite(request, env, me);
   if (path === '/api/platform-config' && method === 'PUT') return updatePlatformConfig(request, env, me);
+
+  if (path === '/api/fonts' && method === 'GET')   return listFonts(env, me);
+  if (path === '/api/fonts' && method === 'POST')  return uploadFont(request, env, me);
+  if ((m = path.match(/^\/api\/fonts\/([a-z0-9-]+)$/)) && method === 'DELETE')
+    return deleteFont(env, me, m[1]);
 
   if (path === '/api/vendors' && method === 'GET')  return listVendors(env, me);
   if (path === '/api/vendors' && method === 'POST') return createVendor(request, env, me);
@@ -592,6 +599,137 @@ async function updatePlatformConfig(request, env, me) {
   return json({ config: row });
 }
 
+/**
+ * Every font a vendor can be given: the bundled catalogue plus anything an
+ * admin uploaded. Readable by any signed-in user so the onboarding form and a
+ * vendor's own settings screen can both offer the list.
+ */
+async function listFonts(env, me) {
+  const { results } = await env.DB.prepare('SELECT * FROM fonts ORDER BY name').all();
+  const custom = (results || []).map((f) => ({
+    key: f.key, name: f.name, kind: f.kind, metricOf: f.metric_of, builtin: false,
+  }));
+  const builtin = Object.entries(FONT_CATALOGUE).map(([key, f]) => ({
+    key, name: f.name, kind: f.kind, metricOf: f.metricOf, builtin: true,
+  }));
+  return json({ fonts: [...builtin, ...custom], fallback: FALLBACK_FONT });
+}
+
+/**
+ * Add a font the catalogue does not cover.
+ *
+ * Both faces are required and both are checked for the glyphs the renderer can
+ * emit BEFORE anything is stored. This is the one control that matters here: a
+ * font missing U+20A6 raises no error at render time, it just quietly drops
+ * every currency symbol, and the first anyone knows is an approved invoice
+ * already sitting in a WhatsApp group.
+ */
+async function uploadFont(request, env, me) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  let form;
+  try { form = await request.formData(); }
+  catch { return fail('bad_request', 'Send multipart/form-data with regular and bold files.'); }
+
+  const key = String(form.get('key') || '').trim().toLowerCase();
+  const name = String(form.get('name') || '').trim();
+  const kind = String(form.get('kind') || 'sans');
+  const metricOf = String(form.get('metric_of') || '').trim() || null;
+
+  if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(key)) {
+    return fail('bad_request', 'key must be 2-31 lowercase letters, digits or hyphens.');
+  }
+  if (Object.hasOwn(FONT_CATALOGUE, key)) {
+    return fail('duplicate', `"${key}" is a bundled font and cannot be replaced.`, 409);
+  }
+  if (!name) return fail('bad_request', 'name is required.');
+  if (!['sans', 'serif', 'mono'].includes(kind)) {
+    return fail('bad_request', 'kind must be sans, serif or mono.');
+  }
+
+  const files = { regular: form.get('regular'), bold: form.get('bold') };
+  for (const [style, file] of Object.entries(files)) {
+    if (!file || typeof file.arrayBuffer !== 'function') {
+      return fail('bad_request', `A ${style} font file is required.`);
+    }
+  }
+
+  const bytes = {};
+  for (const [style, file] of Object.entries(files)) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (buf.length < 4096) return fail('bad_request', `The ${style} file is too small to be a font.`);
+    if (buf.length > 4 * 1024 * 1024) {
+      return fail('bad_request', `The ${style} file is over 4 MB; supply a subset or a lighter face.`);
+    }
+    let font;
+    try { font = fontkit.create(buf); }
+    catch { return fail('bad_request', `The ${style} file is not a readable font.`); }
+    if (font.fonts) {
+      return fail('bad_request', `The ${style} file is a font collection; supply a single face.`);
+    }
+    const gaps = REQUIRED_GLYPHS.filter(([, cp]) => !font.hasGlyphForCodePoint(cp));
+    if (gaps.length) {
+      return fail(
+        'font_missing_glyphs',
+        `The ${style} face is missing ${gaps.map(([ch]) => ch).join(' ')}. `
+        + 'A font without these does not fail at render — it silently drops them '
+        + 'from every invoice.',
+        422,
+        { style, missing: gaps.map(([ch, cp, what]) => ({ glyph: ch, codepoint: `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`, what })) },
+      );
+    }
+    bytes[style] = buf;
+  }
+
+  const keys = fontKeys(key);
+  await env.ASSETS_KV.put(keys.regular, bytes.regular);
+  await env.ASSETS_KV.put(keys.bold, bytes.bold);
+
+  try {
+    await env.DB.prepare(
+      'INSERT INTO fonts (key, name, kind, metric_of, created_by) VALUES (?1,?2,?3,?4,?5)',
+    ).bind(key, name, kind, metricOf, me.email).run();
+  } catch (e) {
+    if (String(e).includes('UNIQUE') || String(e).includes('PRIMARY')) {
+      return fail('duplicate', 'A font with that key already exists.', 409);
+    }
+    throw e;
+  }
+
+  assetCache.clear();
+  console.warn('FONT_UPLOADED', me.email, key);
+  return json({ font: { key, name, kind, metricOf, builtin: false } }, 201);
+}
+
+async function deleteFont(env, me, key) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  if (Object.hasOwn(FONT_CATALOGUE, key)) {
+    return fail('forbidden', 'Bundled fonts cannot be removed.', 403);
+  }
+  // A vendor still pointing at it would silently fall back to Arimo, changing
+  // how their invoices look without anyone choosing that.
+  const { results } = await env.DB.prepare(
+    "SELECT code FROM vendors WHERE json_extract(template_json, '$.type.family') = ?1",
+  ).bind(key).all();
+  if ((results || []).length) {
+    return fail('conflict',
+      `Still used by ${results.map((v) => v.code).join(', ')}. Change those vendors first.`, 409);
+  }
+
+  const r = await env.DB.prepare('DELETE FROM fonts WHERE key = ?1').bind(key).run();
+  if (!r.meta.changes) return fail('not_found', 'No such font.', 404);
+
+  const keys = fontKeys(key);
+  await env.ASSETS_KV.delete(keys.regular);
+  await env.ASSETS_KV.delete(keys.bold);
+  assetCache.clear();
+  console.warn('FONT_DELETED', me.email, key);
+  return json({ ok: true });
+}
+
 async function listVendors(env, me) {
   const denied = requireRosterAdmin(me);
   if (denied) return denied;
@@ -723,6 +861,13 @@ async function putVendorTemplate(request, env, me, id) {
   const errs = validateTemplate(b.template);
   if (errs.length) {
     return fail('invalid_template', errs[0], 422, { errors: errs });
+  }
+
+  // Shape is checked in shared/template.js; existence is a database question.
+  const fam = b.template?.type?.family;
+  if (fam && !Object.hasOwn(FONT_CATALOGUE, fam)) {
+    const known = await env.DB.prepare('SELECT key FROM fonts WHERE key = ?1').bind(fam).first();
+    if (!known) return fail('invalid_template', `Unknown font "${fam}".`, 422, { errors: [`Unknown font "${fam}".`] });
   }
 
   const r = await env.DB.prepare('UPDATE vendors SET template_json = ?1 WHERE id = ?2')
@@ -1413,12 +1558,13 @@ async function loadAssets(env, vendorCode, contactLinesJson, artwork, family = '
   // Fonts are shared across vendors, so they are stored unprefixed. A family
   // whose files have not been uploaded falls back to sans rather than failing
   // the download: the wrong typeface is recoverable, a missing invoice is not.
-  const fam = FONT_FAMILIES[family] || FONT_FAMILIES.sans;
-  let fontRegular = await get(fam.regular, false);
-  let fontBold    = await get(fam.bold, false);
+  const want = fontKeys(family);
+  let fontRegular = await get(want.regular, false);
+  let fontBold    = await get(want.bold, false);
   if (!fontRegular || !fontBold) {
-    fontRegular = await get(FONT_FAMILIES.sans.regular);
-    fontBold    = await get(FONT_FAMILIES.sans.bold);
+    const fb = fontKeys(FALLBACK_FONT);
+    fontRegular = await get(fb.regular);
+    fontBold    = await get(fb.bold);
   }
 
   const assets = {

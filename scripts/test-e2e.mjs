@@ -54,8 +54,11 @@ for (const [key, file] of [
 }
 // Production uses Arimo (Arial-metric, has ₦). DejaVu also has ₦ and is what
 // is available here. Liberation Sans does NOT and would drop the symbol.
-kv.put('Arimo-Regular.ttf', new Uint8Array(readFileSync(FONT_REGULAR)));
-kv.put('Arimo-Bold.ttf', new Uint8Array(readFileSync(FONT_BOLD)));
+// Fonts are shared across vendors and keyed under fonts/<key>-<Style>.ttf.
+// Only the fallback family is seeded, so a template naming any other font
+// exercises the fallback path.
+kv.put('fonts/arimo-Regular.ttf', new Uint8Array(readFileSync(FONT_REGULAR)));
+kv.put('fonts/arimo-Bold.ttf', new Uint8Array(readFileSync(FONT_BOLD)));
 
 const env = { DB, ASSETS_KV: kv, SESSION_SECRET: 'test-secret-not-for-production' };
 
@@ -836,13 +839,17 @@ check('and reaches the rendered document',
 
 // Font family: metric-compatible stand-ins for the faces invoices are set in.
 r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
-  ...partial, type: { family: 'zapf' } } } });
-check('an unknown font family is refused', r.status === 422, JSON.stringify(r.data?.errors));
+  ...partial, type: { family: 'NotAFont' } } } });
+check('a malformed font key is refused', r.status === 422, JSON.stringify(r.data?.errors));
 
 r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
-  ...partial, type: { family: 'serif' } } } });
+  ...partial, type: { family: 'no-such-font' } } } });
+check('a well-formed but unknown font is refused', r.status === 422, JSON.stringify(r.data?.errors));
+
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  ...partial, type: { family: 'tinos' } } } });
 check('a known font family is accepted', r.status === 200, JSON.stringify(r.data));
-check('and survives the merge', r.data?.effective?.type?.family === 'serif',
+check('and survives the merge', r.data?.effective?.type?.family === 'tinos',
   JSON.stringify(r.data?.effective?.type));
 
 // Only the sans pair is seeded in KV here, so serif must fall back rather than
@@ -880,6 +887,73 @@ r = await call('admin', '/api/vendors/1/template', { method: 'PUT', body: { temp
 check('but may not write it', r.status === 403, `status=${r.status}`);
 r = await call('rival', '/api/vendors/1/template');
 check('another vendor may not read it', r.status === 403, `status=${r.status}`);
+
+results.push('\nFont catalogue');
+
+r = await call('reladmin', '/api/fonts');
+check('the catalogue is listed', r.status === 200 && (r.data?.fonts || []).length >= 5,
+  JSON.stringify((r.data?.fonts || []).map((f) => f.key)));
+check('bundled fonts are flagged as such',
+  (r.data?.fonts || []).find((f) => f.key === 'arimo')?.builtin === true);
+check('metric compatibility is exposed so onboarding can explain the choice',
+  (r.data?.fonts || []).find((f) => f.key === 'tinos')?.metricOf === 'Times New Roman');
+r = await call('rel', '/api/fonts');
+check('any signed-in user may read the catalogue', r.status === 200, `status=${r.status}`);
+
+// Uploading a font: the glyph check is the whole point of the route.
+const realFont = readFileSync(FONT_REGULAR);
+const mkForm = (over = {}) => {
+  const f = new FormData();
+  f.set('key', over.key ?? 'housefont');
+  f.set('name', over.name ?? 'House Font');
+  f.set('kind', over.kind ?? 'sans');
+  f.set('regular', new Blob([over.regular ?? realFont]), 'r.ttf');
+  f.set('bold', new Blob([over.bold ?? readFileSync(FONT_BOLD)]), 'b.ttf');
+  return f;
+};
+const postForm = async (who, form) => {
+  const headers = {};
+  if (cookies[who]) headers.Cookie = cookies[who];
+  const res = await worker.fetch(
+    new Request('https://app.test/api/fonts', { method: 'POST', headers, body: form }), env, {});
+  return { status: res.status, data: await res.json().catch(() => null) };
+};
+
+r = await postForm('victor', mkForm());
+check('a vendor cannot upload a font', r.status === 403, `status=${r.status}`);
+
+r = await postForm('reladmin', mkForm({ key: 'arimo' }));
+check('a bundled font cannot be overwritten', r.status === 409, JSON.stringify(r.data));
+
+r = await postForm('reladmin', mkForm({ key: 'Bad Key' }));
+check('a malformed key is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await postForm('reladmin', mkForm({ regular: Buffer.alloc(8192, 1) }));
+check('a file that is not a font is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await postForm('reladmin', mkForm());
+check('a valid font is accepted', r.status === 201, JSON.stringify(r.data));
+check('and appears in the catalogue as custom',
+  (await call('reladmin', '/api/fonts')).data.fonts.find((f) => f.key === 'housefont')?.builtin === false);
+
+r = await postForm('reladmin', mkForm());
+check('keys are unique', r.status === 409, JSON.stringify(r.data));
+
+// A vendor can then be given it, and the document still renders.
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  version: 1, type: { family: 'housefont' } } } });
+check('an uploaded font can be assigned to a vendor', r.status === 200, JSON.stringify(r.data));
+r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('and the invoice renders with it', r.status === 200 && r.data?.length > 20000,
+  `status=${r.status}`);
+
+r = await call('reladmin', '/api/fonts/housefont', { method: 'DELETE' });
+check('a font in use cannot be deleted', r.status === 409, JSON.stringify(r.data));
+await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
+r = await call('reladmin', '/api/fonts/housefont', { method: 'DELETE' });
+check('once unused it can be deleted', r.status === 200, JSON.stringify(r.data));
+r = await call('reladmin', '/api/fonts/arimo', { method: 'DELETE' });
+check('a bundled font cannot be deleted', r.status === 403, `status=${r.status}`);
 
 results.push('\nVendor onboarding');
 

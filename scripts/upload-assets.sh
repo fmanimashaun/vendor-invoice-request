@@ -9,15 +9,9 @@
 # silently drop every ₦ on the document, so scripts/check-fonts.mjs verifies
 # every file before anything is uploaded.
 #
-# All three families are free to redistribute and metrically match the faces
-# most invoices are actually set in, so a vendor's line lengths come out close
-# to their own stationery:
-#
-#   Arimo   -> Arial / Helvetica   https://fonts.google.com/specimen/Arimo
-#   Tinos   -> Times New Roman     https://fonts.google.com/specimen/Tinos
-#   Cousine -> Courier New         https://fonts.google.com/specimen/Cousine
-#
-# Put the .ttf files in assets/. Only the Arimo pair is required.
+# The bundled catalogue is in shared/fonts.js. Fetch it once with
+#   node scripts/fetch-fonts.mjs
+# which downloads each family and verifies the glyphs before keeping it.
 #
 #   ./scripts/upload-assets.sh acme            # remote
 #   ./scripts/upload-assets.sh acme --local    # local dev
@@ -42,8 +36,8 @@ ART=(header.png footer.png logo.png tagline_services.png tagline_slogan.png)
 # whose template asks for a family that is absent falls back to sans.
 #   Arimo   -> Arial / Helvetica     Tinos  -> Times New Roman
 #   Cousine -> Courier New
-FONTS_REQUIRED=(Arimo-Regular.ttf Arimo-Bold.ttf)
-FONTS_OPTIONAL=(Tinos-Regular.ttf Tinos-Bold.ttf Cousine-Regular.ttf Cousine-Bold.ttf)
+# Fonts live in assets/fonts/ and upload under the fonts/ prefix, shared by
+# every vendor. Fetch them with: node scripts/fetch-fonts.mjs
 
 for f in "${ART[@]}"; do
   if [[ ! -f "assets/$CODE/$f" ]]; then
@@ -53,13 +47,10 @@ for f in "${ART[@]}"; do
   fi
 done
 
-for f in "${FONTS_REQUIRED[@]}"; do
-  if [[ ! -f "assets/$f" ]]; then
-    echo "MISSING assets/$f" >&2
-    echo "  Download it from Google Fonts (see the header of this script)." >&2
-    exit 1
-  fi
-done
+if [[ ! -d assets/fonts ]]; then
+  echo "MISSING assets/fonts/ — run: node scripts/fetch-fonts.mjs" >&2
+  exit 1
+fi
 
 # A font without the Naira glyph does not error, it silently drops every ₦.
 echo "checking fonts"
@@ -71,10 +62,11 @@ for f in "${ART[@]}"; do
 done
 
 FONTS_UPLOADED=0
-for f in "${FONTS_REQUIRED[@]}" "${FONTS_OPTIONAL[@]}"; do
-  [[ -f "assets/$f" ]] || continue
-  echo "uploading $f (shared)"
-  npx wrangler kv key put "$f" --path "assets/$f" --binding "$BINDING" "$FLAG"
+for path in assets/fonts/*.ttf; do
+  [[ -f "$path" ]] || continue
+  f="$(basename "$path")"
+  echo "uploading fonts/$f (shared)"
+  npx wrangler kv key put "fonts/$f" --path "$path" --binding "$BINDING" "$FLAG"
   FONTS_UPLOADED=$((FONTS_UPLOADED + 1))
 done
 

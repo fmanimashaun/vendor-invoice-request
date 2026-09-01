@@ -14,35 +14,29 @@ import fontkit from '@pdf-lib/fontkit';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FONT_FAMILIES } from '../shared/template.js';
+import { FONT_CATALOGUE, REQUIRED_GLYPHS, FALLBACK_FONT } from '../shared/fonts.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const ASSETS = process.env.ASSET_DIR || join(ROOT, 'assets');
+const ASSETS = join(process.env.ASSET_DIR || join(ROOT, 'assets'), 'fonts');
 
 // Everything the renderer can put on a page. Naira is the one that bites, but
 // a font missing basic punctuation would be just as invisible.
-const REQUIRED = [
-  ['₦', 0x20a6, 'Naira sign'],
-  ['–', 0x2013, 'en dash, used in the subject line'],
-  ['-', 0x002d, 'hyphen'],
-  ['0', 0x0030, 'digits'],
-  ['A', 0x0041, 'basic Latin'],
-];
+const REQUIRED = REQUIRED_GLYPHS;
 
 let checked = 0;
 let failed = 0;
 let missing = 0;
 
-for (const [family, spec] of Object.entries(FONT_FAMILIES)) {
-  for (const [style, file] of [['regular', spec.regular], ['bold', spec.bold]]) {
+for (const [family, spec] of Object.entries(FONT_CATALOGUE)) {
+  for (const [style, file] of [['regular', `${family}-Regular.ttf`], ['bold', `${family}-Bold.ttf`]]) {
     const path = join(ASSETS, file);
     if (!existsSync(path)) {
       // Only sans is required: the others are optional and fall back to it.
-      if (family === 'sans') {
-        console.error(`MISSING  ${file}  (${family} ${style}) — required`);
+      if (family === FALLBACK_FONT) {
+        console.error(`MISSING  ${file}  (${family} ${style}) — required fallback`);
         missing++;
       } else {
-        console.log(`skipped  ${file}  (${family} ${style}) — not present, will fall back to sans`);
+        console.log(`skipped  ${file}  (${family} ${style}) — not present, will fall back to ${FALLBACK_FONT}`);
       }
       continue;
     }
@@ -65,12 +59,12 @@ for (const [family, spec] of Object.entries(FONT_FAMILIES)) {
     checked++;
     if (gaps.length) {
       failed++;
-      console.error(`FAIL     ${file}  (${family} ${style}, metric-compatible with ${spec.metricOf})`);
+      console.error(`FAIL     ${file}  (${family} ${style}, ${spec.metricOf ? 'metric-compatible with ' + spec.metricOf : spec.kind})`);
       for (const [ch, cp, what] of gaps) {
         console.error(`           missing ${ch}  U+${cp.toString(16).toUpperCase().padStart(4, '0')}  ${what}`);
       }
     } else {
-      console.log(`ok       ${file}  (${family} ${style} -> ${spec.metricOf})`);
+      console.log(`ok       ${file}  (${family} ${style}${spec.metricOf ? ' -> ' + spec.metricOf : ''})`);
     }
   }
 }

@@ -152,6 +152,23 @@ CREATE TABLE IF NOT EXISTS vendor_config (
   updated_by          TEXT NOT NULL DEFAULT 'seed'
 );
 
+-- ── fonts ──────────────────────────────────────────────────────────────
+-- Fonts an admin uploaded, on top of the catalogue bundled in shared/fonts.js.
+-- The files live in KV under fonts/<key>-Regular.ttf and fonts/<key>-Bold.ttf,
+-- shared across vendors; this table is only the metadata that makes them
+-- selectable during onboarding.
+--
+-- Nothing gets in here without passing the glyph check in the upload route: a
+-- font missing U+20A6 does not error at render, it silently drops every ₦.
+CREATE TABLE IF NOT EXISTS fonts (
+  key        TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'sans' CHECK (kind IN ('sans','serif','mono')),
+  metric_of  TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by TEXT NOT NULL DEFAULT 'seed'
+);
+
 -- ── requests ───────────────────────────────────────────────────────────
 -- Raised by the client. Single line item, so description/amount live here.
 CREATE TABLE IF NOT EXISTS requests (

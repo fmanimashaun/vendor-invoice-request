@@ -160,6 +160,25 @@ npm install
 
 ### 2. Letterhead artwork
 
+### Fonts
+
+```bash
+node scripts/fetch-fonts.mjs        # downloads and verifies the bundled catalogue
+```
+
+Seven families ship, self-hosted — nothing is fetched from a font service when
+an invoice is rendered. Four are metric-compatible substitutes for the faces
+most stationery is set in (Arial, Times New Roman, Courier New, Calibri), which
+means the same character widths and so the same line breaks. A vendor's font is
+chosen during onboarding, and an admin can upload anything the catalogue misses.
+
+Every font is checked for the ₦ sign before it is accepted, wherever it comes
+from. A font missing it does not fail at render — it silently drops the symbol
+from every invoice. Three popular families were rejected by that check when the
+catalogue was first assembled.
+
+### Vendor letterheads
+
 Ask each vendor for **two documents**: a blank letterhead and one old invoice.
 The blank supplies the stationery safely; the invoice supplies the layout.
 

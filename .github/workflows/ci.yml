@@ -30,8 +30,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-dejavu-core python3-pip
           pip install --quiet pillow
-          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf      assets/Arimo-Regular.ttf
-          cp /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf assets/Arimo-Bold.ttf
+          mkdir -p assets/fonts
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf      assets/fonts/arimo-Regular.ttf
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf assets/fonts/arimo-Bold.ttf
           python - <<'PY'
           from PIL import Image
           for name, size in [('header',(1121,610)), ('footer',(1122,648)), ('logo',(768,255)),
