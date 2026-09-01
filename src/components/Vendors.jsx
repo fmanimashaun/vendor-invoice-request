@@ -398,6 +398,12 @@ ${PASSWORD_HINT}
                     }}>{off ? 'removed' : 'active'}</span>
                   </Td>
                   <Td right>
+                    {/* Vendors never use single sign-on, so a password reset is
+                        the only way back in for them. */}
+                    <button disabled={busyId === `u${u.id}`} onClick={() => resetPassword(u)}
+                            style={{ ...button('ghost', busyId === `u${u.id}`), marginRight: 6 }}>
+                      Reset password
+                    </button>
                     <button disabled={busyId === `u${u.id}`} onClick={() => toggleUser(u)}
                             style={button('ghost', busyId === `u${u.id}`)}>
                       {off ? 'Restore' : 'Remove'}

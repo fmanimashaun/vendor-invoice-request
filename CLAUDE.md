@@ -348,7 +348,10 @@ account over.
   not OIDC). Lock the Entra IdP to the client's tenant ID *and* add an Access
   policy on the email domain; accepting the multi-tenant `common` endpoint
   without validating `tid` lets any Microsoft account sign in.
-- **Vendors** → email + password. PBKDF2-HMAC-SHA256 via SubtleCrypto
+- **Vendors** → email + password, permanently. They are not in the client's
+  directory and never will be, so single sign-on does not apply to them and the
+  cutover leaves them untouched. A password reset by an admin is their only
+  recovery path. MFA is a possible later addition; there is none today. PBKDF2-HMAC-SHA256 via SubtleCrypto
   (bcrypt/argon2 need WASM in Workers). `PBKDF2_ITERATIONS` in `auth.js` should
   be re-checked against OWASP guidance periodically; it rises.
 - **Roles live in D1, never in IdP group claims.** Vendor staff are not in
