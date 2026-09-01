@@ -16,7 +16,7 @@ import {
   signSession, sessionCookie,
 } from './auth.js';
 import { renderInvoice } from './renderInvoice.js';
-import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE } from '../shared/template.js';
+import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE, FONT_FAMILIES } from '../shared/template.js';
 import {
   REQUEST_TYPES,
   typeFor, numberingSiteIn, invoiceRef, downloadName, siteNameIn, buNameIn, periodLabel,
@@ -1330,7 +1330,8 @@ async function invoicePdf(env, me, invoiceNo) {
   let tpl = null;
   try { tpl = row.template_json ? JSON.parse(row.template_json) : null; } catch { tpl = null; }
   const merged = mergeTemplate(tpl);
-  const assets = await loadAssets(env, row.vendor_code, row.contact_lines, merged.artwork);
+  const assets = await loadAssets(env, row.vendor_code, row.contact_lines,
+                                  merged.artwork, merged.type.family);
 
   const bytes = await renderInvoice({
     bu_code: row.bu_code,
@@ -1386,8 +1387,9 @@ const assetCache = new Map();   // vendor code -> loaded artwork + fonts
  * live text from the vendors row, not a raster: in the original source
  * template that image ran 123pt off the page edge and clipped the address.
  */
-async function loadAssets(env, vendorCode, contactLinesJson, artwork) {
-  const cached = assetCache.get(vendorCode);
+async function loadAssets(env, vendorCode, contactLinesJson, artwork, family = 'sans') {
+  const key = `${vendorCode}:${family}`;
+  const cached = assetCache.get(key);
   if (cached) return cached;
 
   const get = async (key, required = true) => {
@@ -1408,15 +1410,24 @@ async function loadAssets(env, vendorCode, contactLinesJson, artwork) {
     if (bytes) art[a.asset] = bytes;
   }
 
+  // Fonts are shared across vendors, so they are stored unprefixed. A family
+  // whose files have not been uploaded falls back to sans rather than failing
+  // the download: the wrong typeface is recoverable, a missing invoice is not.
+  const fam = FONT_FAMILIES[family] || FONT_FAMILIES.sans;
+  let fontRegular = await get(fam.regular, false);
+  let fontBold    = await get(fam.bold, false);
+  if (!fontRegular || !fontBold) {
+    fontRegular = await get(FONT_FAMILIES.sans.regular);
+    fontBold    = await get(FONT_FAMILIES.sans.bold);
+  }
+
   const assets = {
     artwork: art,
-    // Arimo: has the Naira glyph U+20A6 and is metrically Arial-compatible.
-    // Liberation Sans does NOT have it and silently drops the symbol.
-    fontRegular: await get('Arimo-Regular.ttf'),
-    fontBold:    await get('Arimo-Bold.ttf'),
+    fontRegular,
+    fontBold,
     contact: JSON.parse(contactLinesJson || '[]'),
   };
-  assetCache.set(vendorCode, assets);
+  assetCache.set(key, assets);
   return assets;
 }
 

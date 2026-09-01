@@ -5,6 +5,68 @@ queue; whichever approves first issues a numbered PDF on their own
 letterhead. Replaces a manual Google Docs process where one document was
 duplicated and hand-edited for every request.
 
+## The problem
+
+An organisation pays recurring operational bills across many locations —
+electricity at each clinic, an internet router at each site, staff data and
+airtime per business unit. It does not pay the utility directly. A vendor funds
+the wallet or settles the bill, adds a fee, and invoices for it. Finance needs a
+document per payment to push through their approvals system.
+
+That document used to be a Google Doc, duplicated and hand-edited for every
+request. Which produced, reliably:
+
+- **Duplicate funding.** The same September electricity bill funded twice is
+  money out of the door, and it is invisible: two documents with different
+  numbers describing the same underlying bill look like two legitimate
+  payments. OCR in the approvals system cannot tell them apart.
+- **Numbering that drifts.** Copy a document, forget to change the reference,
+  and two payments share one number. Or the number jumps and an auditor asks
+  why.
+- **Transcription errors.** A document addressed to one site carrying another
+  site's description, because it was duplicated from that site's request.
+- **Amounts that get misread.** The original template said "credit ₦75,000 to
+  the account below [₦100 for processing fee]". Accounts payable transferred
+  ₦75,000 every time, and the fee was short every time.
+- **No record of who approved what.** The paper trail said the vendor's company
+  name and nothing about which person at that vendor stood behind it.
+- **One vendor.** The document was that vendor's letterhead, hand-made by them.
+  Changing vendor meant changing the process.
+
+### What this does about it
+
+The division is deliberate: **the system decides what a human should not be
+trusted to decide, and humans decide what only they can.**
+
+| Decision | Who | How |
+|---|---|---|
+| Is this a duplicate? | **The system**, at submit | A database constraint blocks an exact re-submission. A same-period request at a different amount warns, and the requester's override is recorded. |
+| Is the amount plausible? | **The system**, at submit | Warns when it deviates sharply from the last approved bill for that site. |
+| Is the bill actually correct? | **The approver** | They hold the real bill. Approving is an attestation, so they can reject with a reason. |
+| Withdraw a mistake | The requester | Their own pending requests only. |
+
+The reason duplicate detection is a database constraint and not a checkbox on
+the approver's screen is **incentive**. Vendors are paid per transaction, and
+they now compete for a shared queue where approving first wins the work. Asking
+the party that profits from volume, and is rewarded for speed, to police
+duplicates puts the control in exactly the wrong hands. Moving it into the
+schema takes the judgement away from them entirely.
+
+Everything else follows from that:
+
+- The invoice number is reserved **at approval**, never at request time, so a
+  rejected request leaves no gap in an issued sequence.
+- Money is integer minor units end to end, and the document prints bill amount,
+  fee, VAT and total as separate lines, because the old one-line phrasing is
+  what caused the short transfers.
+- Bank details, signatory, tax and the approver's own name are **copied onto
+  the invoice at issue**, so editing configuration later cannot rewrite a
+  document that has already gone out.
+- Any vendor can be onboarded, issues on their own letterhead, and sees only
+  the shared queue plus their own history.
+
+## How it fits together
+
 ```
 Client (SSO: Entra / Zoho)          Vendors (email + password)
         │                                       │

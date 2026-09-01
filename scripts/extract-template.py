@@ -172,9 +172,21 @@ def read_layout(page, header_band, footer_band):
              and float(w['x1']) > left + (right - left) * 0.5]
     col_amount = round(max((float(w['x1']) for w in money), default=right), 1)
 
+    # Which family the sample is set in. Font names in a PDF are usually
+    # subset-tagged like 'ABCDEF+TimesNewRomanPSMT', so match on substrings.
+    names = Counter(str(w.get('fontname') or '').lower() for w in body)
+    joined = ' '.join(names)
+    if any(k in joined for k in ('times', 'serif', 'georgia', 'garamond',
+                                 'book', 'roman', 'minion', 'cambria')):
+        family = 'serif'
+    elif any(k in joined for k in ('courier', 'mono', 'consol')):
+        family = 'mono'
+    else:
+        family = 'sans'
+
     return {'body': body_size, 'small': small_size, 'ink': ink,
             'left': round(left, 1), 'right': round(right, 1),
-            'colAmount': col_amount, 'count': len(body)}
+            'colAmount': col_amount, 'count': len(body), 'family': family}
 
 
 def main():
@@ -263,7 +275,7 @@ def main():
         if geo is None:
             geo = {'body': 10.5, 'small': 8.2, 'ink': '#1a1a1a',
                    'left': 86.4, 'right': round(pw - 62, 1),
-                   'colAmount': round(pw - 62, 1), 'count': 0}
+                   'colAmount': round(pw - 62, 1), 'count': 0, 'family': 'sans'}
             layout_from = 'defaults'
 
         body_size, small_size, ink = geo['body'], geo['small'], geo['ink']
@@ -318,7 +330,8 @@ def main():
             'page': {'w': round(pw, 2), 'h': round(ph, 2)},
             'colors': {'ink': ink, 'soft': '#6b6b6b', 'rule': '#c7c7c7'},
             'type': {'body': body_size, 'small': small_size,
-                     'subject': round(body_size * 1.1, 1)},
+                     'subject': round(body_size * 1.1, 1),
+                     'family': geo.get('family', 'sans')},
             'margins': {'left': round(left, 1), 'right': round(right, 1)},
             'artwork': artwork,
             'staticText': static_runs,
@@ -343,8 +356,8 @@ def main():
     print(f'  layout read from: {layout_from}')
     print(f'  page   {template["page"]["w"]} x {template["page"]["h"]}')
     print(f'  bands  header 0-{header_band:.0f}pt, footer {footer_band:.0f}-{ph:.0f}pt')
-    print(f'  body   {body_size}pt {ink}, margins {template["margins"]["left"]}'
-          f'-{template["margins"]["right"]}')
+    print(f'  body   {body_size}pt {ink} {geo.get("family", "sans")}, margins '
+          f'{template["margins"]["left"]}-{template["margins"]["right"]}')
     print(f'  wrote  {path.relative_to(ROOT)}')
     if args.blank:
         print('\n  Blank letterhead: everything on the page was kept, because none')

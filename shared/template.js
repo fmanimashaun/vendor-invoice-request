@@ -34,6 +34,18 @@ export const DEFAULT_TEMPLATE = {
     body:    10.5,
     small:    8.2,
     subject: 11.5,
+    // Which family to render in. Every option is metrically compatible with a
+    // widely used proprietary face, so a vendor's line lengths and page
+    // rhythm come out close to their own stationery without shipping fonts
+    // nobody may redistribute:
+    //
+    //   sans  Arimo   -> Arial, Helvetica       (the common case)
+    //   serif Tinos   -> Times New Roman
+    //   mono  Cousine -> Courier New
+    //
+    // Falls back to sans when the family's files are not in KV, because a
+    // document in the wrong family beats no document at all.
+    family: 'sans',
   },
 
   margins: { left: 86.4, right: 533.28 },
@@ -105,6 +117,21 @@ export const DEFAULT_TEMPLATE = {
     nameGap:   15,
     lineGap:   14,
   },
+};
+
+/**
+ * Font families the renderer can use, and the KV keys that hold them.
+ *
+ * All three are metric-compatible replacements for faces most invoices are
+ * actually set in, and all are freely redistributable. Every one of them must
+ * contain the Naira glyph U+20A6 — scripts/check-fonts.mjs enforces that
+ * before upload, because a font missing it does not error, it silently drops
+ * every currency symbol on the document.
+ */
+export const FONT_FAMILIES = {
+  sans:  { regular: 'Arimo-Regular.ttf',   bold: 'Arimo-Bold.ttf',   metricOf: 'Arial / Helvetica' },
+  serif: { regular: 'Tinos-Regular.ttf',   bold: 'Tinos-Bold.ttf',   metricOf: 'Times New Roman' },
+  mono:  { regular: 'Cousine-Regular.ttf', bold: 'Cousine-Bold.ttf', metricOf: 'Courier New' },
 };
 
 /** '#1a1a1a' -> [0.102, 0.102, 0.102]. Accepts an [r,g,b] array unchanged. */
@@ -197,6 +224,11 @@ export function validateTemplate(t) {
         errs.push(`artwork[${i}] ("${a.asset}") runs ${Math.round(a.top + a.h - page.h)}pt off the bottom.`);
       }
     });
+  }
+
+  const fam = t.type?.family;
+  if (fam !== undefined && !Object.hasOwn(FONT_FAMILIES, fam)) {
+    errs.push(`type.family must be one of ${Object.keys(FONT_FAMILIES).join(', ')}.`);
   }
 
   if (t.staticText !== undefined) {

@@ -181,59 +181,33 @@ time. Every figure gets its own line for that reason.
 
 ## Fonts — a real trap
 
-The renderer needs a font containing the Naira glyph **U+20A6**. Use **Arimo**:
-it has the glyph and is metrically compatible with Arial, which the source
-template used. **Liberation Sans does not have it** and silently drops every ₦
-from the document. Arimo is Apache-2.0, so bundling it is fine. Upload it to KV
-as `Arimo-Regular.ttf` / `Arimo-Bold.ttf` via `scripts/upload-assets.sh`. The
-fonts are shared across vendors and stored unprefixed; only the artwork is
-namespaced by vendor code.
+The renderer needs a font containing the Naira glyph **U+20A6**. A font without
+it does not error: pdf-lib embeds it happily and every ₦ silently disappears
+from the document. **Liberation Sans is the classic trap** — metrically
+Arial-compatible, widely recommended, missing the glyph.
 
-## Vendor layout templates
+`scripts/check-fonts.mjs` verifies every file before upload and
+`upload-assets.sh` runs it. Do not bypass it.
 
-A template is a digitised replica of one vendor's invoice: page size, artwork
-placement, colours, type sizes, margins, column positions, vertical rhythm.
-Stored as `vendors.template_json`; NULL means the built-in default layout.
-`shared/template.js` holds `DEFAULT_TEMPLATE`, `mergeTemplate` and
-`validateTemplate`; `renderInvoice.js` is a pure interpreter of the result and
-contains **no hardcoded geometry**. Keep it that way.
+Three families are supported, chosen per vendor by `type.family` in their
+template. Each is freely redistributable and metrically matches a face real
+invoices are actually set in, so a vendor's line lengths and page rhythm come
+out close to their own stationery:
 
-What a template does NOT change is the document's *structure* — the sections
-and their order. Numbering, the duplicate guards and approver attribution all
-depend on that contract. A template decides how the document looks, not what it
-says.
+| `family` | Font | Metric-compatible with |
+|---|---|---|
+| `sans` | Arimo | Arial, Helvetica |
+| `serif` | Tinos | Times New Roman |
+| `mono` | Cousine | Courier New |
 
-### Onboarding a vendor: ask for two documents
+Fonts are shared across vendors and stored in KV **unprefixed**; only artwork
+is namespaced by vendor code. Only the sans pair is required — a template
+asking for a family whose files are absent falls back to sans, because the
+wrong typeface is recoverable and a failed download is not.
 
-```bash
-python scripts/extract-template.py blank-letterhead.pdf --code acme --blank     --layout an-old-invoice.pdf
-./scripts/upload-assets.sh acme
-# PUT {"template": <assets/acme/template.json>} to /api/vendors/<id>/template
-```
-
-- The **blank letterhead** supplies the stationery. Nothing on it is invoice
-  data, so every image and every word is kept and nothing can leak.
-- The **sample invoice** supplies the layout — margins, columns, type sizes,
-  ink colour. None of its text is kept, only measurements.
-
-Without `--blank` the script has to guess which text is stationery and which is
-the sample's own data. That guess got the bank account number wrong the first
-time it was run for real, which is why the default now keeps nothing from the
-bottom of the page and `--blank` warns when the page looks populated.
-
-### Things that will bite
-
-- **Validation runs at upload, not at render.** A vendor discovering their
-  layout is broken at the moment they approve something is far too late.
-- **Artwork may bleed up to 5% off the page.** Real letterheads do. The
-  clipped-address bug ran 11% off, so it is still caught.
-- **Missing artwork is skipped, not fatal.** A template naming a band the
-  vendor has not uploaded renders without it; a 500 at download would be worse.
-- **Fonts are not extracted.** Embedded fonts are subsets and rarely
-  redistributable, so everything renders in Arimo. A vendor whose stationery is
-  far from Arial metrics will see different line lengths.
-- `assetCache` is cleared on every template write — assets are cached per
-  vendor for the life of the isolate.
+The extractor picks the family from the sample invoice's own font names. PDF
+font names are usually subset-tagged (`ABCDEF+TimesNewRomanPSMT`), so it
+matches on substrings.
 
 ## Layout geometry
 

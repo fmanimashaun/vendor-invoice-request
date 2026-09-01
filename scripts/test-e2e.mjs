@@ -834,6 +834,23 @@ check('and reaches the rendered document',
   withStatic.status === 200 && withStatic.data.length !== tplPdf.data.length,
   `${withStatic.data?.length} vs ${tplPdf.data.length}`);
 
+// Font family: metric-compatible stand-ins for the faces invoices are set in.
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  ...partial, type: { family: 'zapf' } } } });
+check('an unknown font family is refused', r.status === 422, JSON.stringify(r.data?.errors));
+
+r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: {
+  ...partial, type: { family: 'serif' } } } });
+check('a known font family is accepted', r.status === 200, JSON.stringify(r.data));
+check('and survives the merge', r.data?.effective?.type?.family === 'serif',
+  JSON.stringify(r.data?.effective?.type));
+
+// Only the sans pair is seeded in KV here, so serif must fall back rather than
+// fail the download — the wrong typeface beats no invoice.
+r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
+check('a family with no font files falls back instead of failing',
+  r.status === 200 && r.data?.length > 20000, `status=${r.status}`);
+
 // Clearing returns the vendor to the default layout.
 r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
 check('a template can be cleared', r.status === 200 && r.data?.isDefault === true,

@@ -39,6 +39,9 @@ jobs:
               Image.new('RGBA', size, (255,255,255,0)).save(f'assets/{name}.png')
           PY
 
+      # A font without U+20A6 drops every currency symbol silently.
+      - run: node scripts/check-fonts.mjs
+
       - run: npm test
 
   build:
