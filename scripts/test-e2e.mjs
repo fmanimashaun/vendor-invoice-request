@@ -1359,6 +1359,26 @@ sso = await resolveOrProvisionSsoUser({ ...env, SSO_ALLOWED_DOMAINS: 'client.exa
   { email: 'outsider@example.com' });
 check('the domain allowlist blocks an outside address', sso.denied === 'domain', JSON.stringify(sso));
 
+// An organisation with several email domains lists them all. Whitespace is
+// tolerated and matching is case-insensitive, because an IdP may assert either.
+const many = ' one.example, two.example ,THREE.example';
+for (const [email, want] of [
+  ['a@one.example', true],
+  ['b@two.example', true],
+  ['c@three.example', true],
+  ['d@THREE.example', true],
+  ['e@four.example', false],
+  // A suffix match would let this straight in, which is the whole reason the
+  // comparison is exact.
+  ['f@evil-two.example', false],
+  // Subdomains are not implied either: list them explicitly if you use them.
+  ['g@mail.two.example', false],
+]) {
+  sso = await resolveOrProvisionSsoUser({ ...env, SSO_ALLOWED_DOMAINS: many }, { email });
+  check(`several email domains: ${want ? 'allows' : 'blocks'} ${email}`,
+    want ? !!sso.user : sso.denied === 'domain', JSON.stringify(sso));
+}
+
 sso = await resolveOrProvisionSsoUser(env, {});
 check('a token with no email is refused', sso.denied === 'no_email', JSON.stringify(sso));
 

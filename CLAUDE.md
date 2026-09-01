@@ -386,8 +386,16 @@ account over.
   Note the consequence: the client admin can create a vendor approver and sign
   in as it. The self-approval check compares user ids, so that path is not
   caught. This is a deliberate ownership decision, not an oversight.
+- **Several email domains are normal.** `sso_allowed_domains` is a comma
+  separated list and an organisation may well have three. Matching is exact and
+  case-insensitive: a suffix match would admit `evil-yourcompany.com`, and
+  subdomains are not implied, so list `mail.yourcompany.com` separately if you
+  use it.
 - `users.email` is the join key, so one person arriving via Entra and via Zoho
-  resolves to one record **only if both assert the same address**. If the Zoho
+  resolves to one record **only if both assert the same address**. With several
+  domains in play this is a live risk rather than a theoretical one: someone
+  who signs in once as `a@domain-one` and later as `a@domain-two` becomes two
+  accounts with separate roles and separate history. There is no merge. If the Zoho
   population is on a different domain, one human becomes two users and the
   self-approval check stops working.
 
