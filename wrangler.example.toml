@@ -25,6 +25,23 @@ database_id = "REPLACE_WITH_YOUR_D1_ID"
 binding = "ASSETS_KV"
 id = "REPLACE_WITH_YOUR_KV_ID"
 
+# ── Custom domain ──────────────────────────────────────────────────────
+# Uncomment once the zone is ACTIVE in this Cloudflare account (nameservers
+# moved at the registrar and Cloudflare showing the domain as Active).
+# Deploying before then fails: the route cannot be provisioned without the zone.
+#
+# `custom_domain = true` makes Cloudflare create the DNS record and the TLS
+# certificate for you. There is nothing to add by hand.
+#
+# routes = [
+#   { pattern = "vendor-invoice-request.com.ng", custom_domain = true }
+# ]
+#
+# Once it resolves, turn the workers.dev URL off so the app has exactly one
+# address — Workers & Pages -> the Worker -> Settings -> Domains & Routes ->
+# disable the workers.dev route. Two live URLs for a document system is one
+# more than anyone needs to audit.
+
 [vars]
 # Cloudflare Access — required for client-side SSO. Without both of these the
 # Worker skips the Access path entirely and only password login works, which is
