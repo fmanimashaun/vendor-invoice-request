@@ -386,6 +386,15 @@ account over.
   Note the consequence: the client admin can create a vendor approver and sign
   in as it. The self-approval check compares user ids, so that path is not
   caught. This is a deliberate ownership decision, not an oversight.
+**Today: passwords only, accounts created by hand.** SSO is off out of the box
+and there is no plan to turn it on. Every account — client staff and vendor
+staff alike — is created by a client admin with one email address and a
+password. `users.email` is UNIQUE, so one person is one account, and the
+duplicate-identity problem below cannot arise while provisioning stays manual.
+
+The SSO path exists, is tested, and costs nothing while unused. Everything
+after this point applies only if someone later switches it on.
+
 - **Several email domains are normal.** `sso_allowed_domains` is a comma
   separated list and an organisation may well have three. Matching is exact and
   case-insensitive: a suffix match would admit `evil-yourcompany.com`, and

@@ -329,6 +329,12 @@ app.
 
 ## Single sign-on setup
 
+> **Not required.** The app runs on email and password, and accounts are
+> created by an administrator. Nothing below is needed to deploy or operate it;
+> it is here for whenever, or if ever, you want SSO. Switching it on later
+> needs no redeploy — it is configured in Settings.
+
+
 client staff sign in through Cloudflare Access. Vendor staff use email and
 password inside the app. Both end up with the same session cookie.
 
