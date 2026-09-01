@@ -975,7 +975,8 @@ check('and they can sign in before SSO exists', r.status === 200, JSON.stringify
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
   org: 'client', email: 'nopw@client.example', full_name: 'No Password', roles: ['member'] } });
-check('a client user without a password is refused', r.status === 400, JSON.stringify(r.data));
+check('a client user without a password is refused', r.status === 422
+  && r.data?.error === 'weak_password', JSON.stringify(r.data));
 
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
   org: 'client', email: 'x@client.example', full_name: 'X', roles: ['member'],
@@ -1014,6 +1015,92 @@ check('two admins: one may remove the other', r.status === 200, JSON.stringify(r
 r = await call(asAdmin2, `/api/users/${admin2}/status`, { method: 'POST', body: { status: 'disabled' } });
 check('the last remaining admin cannot be removed', r.status === 403, JSON.stringify(r.data));
 DB.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('active', rootAdmin.id);
+
+results.push('\nPassword policy and admin reset');
+
+// Length is the rule. No composition requirements, on purpose.
+for (const [why, pw] of [
+  ['too short', 'short1'],
+  ['too repetitive', 'aaaaaaaaaaaaaa'],
+  ['an obvious choice', 'Password1!'],
+  ['a keyboard run', 'qwertyuiop12345'],
+]) {
+  r = await call('reladmin', '/api/users', { method: 'POST', body: {
+    org: 'client', email: `pw-${Math.random().toString(36).slice(2, 8)}@client.example`,
+    full_name: 'PW Test', roles: ['member'], password: pw } });
+  check(`refuses ${why}`, r.status === 422 && r.data?.error === 'weak_password',
+    `${r.status} ${JSON.stringify(r.data?.errors)}`);
+}
+check('the refusal carries a hint the form can show',
+  typeof r.data?.hint === 'string' && r.data.hint.length > 10, JSON.stringify(r.data?.hint));
+
+// A long passphrase passes without needing a symbol or a capital.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'phrase@client.example', full_name: 'Pass Phrase',
+  roles: ['member'], password: 'correct horse battery staple' } });
+check('a plain passphrase is accepted', r.status === 201, JSON.stringify(r.data));
+const phraseId = r.data?.user?.id;
+
+// The blocklist matches the whole password, not a substring: rejecting
+// anything containing "password" would throw out real phrases.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'contains@client.example', full_name: 'Contains Word',
+  roles: ['member'], password: 'a-long-enough-password' } });
+check('a phrase merely containing "password" is fine', r.status === 201, JSON.stringify(r.data));
+
+// A password built out of the account's own identity is not a secret.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', email: 'samantha@client.example', full_name: 'Samantha',
+  roles: ['member'], password: 'samantha@client.example' } });
+check('a password made of the email is refused', r.status === 422, JSON.stringify(r.data?.errors));
+
+// Admin reset: no email service yet, so this is the whole reset path.
+r = await call('victor', `/api/users/${phraseId}/password`, { method: 'POST', body: {
+  password: 'a-long-enough-replacement' } });
+check('a vendor cannot reset a password', r.status === 403, `status=${r.status}`);
+
+r = await call('reladmin', `/api/users/${phraseId}/password`, { method: 'POST', body: {
+  password: 'short' } });
+check('a reset is held to the same policy', r.status === 422, JSON.stringify(r.data?.errors));
+
+r = await call('reladmin', `/api/users/${phraseId}/password`, { method: 'POST', body: {
+  password: 'a-long-enough-replacement' } });
+check('an admin resets a password', r.status === 200 && r.data?.mustChange === true,
+  JSON.stringify(r.data));
+
+const rootRow = DB.db.prepare("SELECT id FROM users WHERE email='roster.admin@client.example'").get();
+r = await call('reladmin', `/api/users/${rootRow.id}/password`, { method: 'POST', body: {
+  password: 'a-long-enough-replacement' } });
+check('an admin cannot reset their own password this way', r.status === 400, JSON.stringify(r.data));
+
+// The admin knows the temporary password, so the account is fenced off until
+// the owner replaces it.
+await sessionFor('phrase', 'phrase@client.example');
+r = await call('phrase', '/api/bootstrap');
+check('the app still loads so the change form can render', r.status === 200, `status=${r.status}`);
+check('and it says a change is required', r.data?.mustChangePassword === true,
+  JSON.stringify(r.data?.mustChangePassword));
+r = await call('phrase', '/api/requests');
+check('but nothing else is reachable',
+  r.status === 403 && r.data?.error === 'password_change_required', JSON.stringify(r.data));
+
+r = await call('phrase', '/api/auth/password', { method: 'POST', body: {
+  current_password: 'wrong-one', password: 'another-long-password' } });
+check('changing it needs the current password', r.status === 401, JSON.stringify(r.data));
+
+r = await call('phrase', '/api/auth/password', { method: 'POST', body: {
+  current_password: 'a-long-enough-replacement', password: 'a-long-enough-replacement' } });
+check('and it must actually be different', r.status === 400, JSON.stringify(r.data));
+
+r = await call('phrase', '/api/auth/password', { method: 'POST', body: {
+  current_password: 'a-long-enough-replacement', password: 'a brand new passphrase here' } });
+check('the owner sets their own password', r.status === 200, JSON.stringify(r.data));
+
+r = await call('phrase', '/api/requests');
+check('and the account is unfenced', r.status === 200, `status=${r.status}`);
+r = await call('anon', '/api/auth/login', { method: 'POST', body: {
+  email: 'phrase@client.example', password: 'a brand new passphrase here' } });
+check('the new password signs in', r.status === 200, JSON.stringify(r.data));
 
 results.push('\nVendor onboarding');
 

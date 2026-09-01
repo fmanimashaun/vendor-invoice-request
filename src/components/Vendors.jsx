@@ -3,6 +3,7 @@ import { T, FONT, input as inputStyle } from '../theme.js';
 import { Card, Field, Table, Td, Banner, button } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import { naira } from '../../shared/reference.js';
+import { PASSWORD_HINT, MIN_LENGTH } from '../../shared/password.js';
 
 const BLANK_VENDOR = {
   code: '', name: '', contact_lines: '',
@@ -64,7 +65,7 @@ export default function Vendors() {
     && vForm.bank_account_number && vForm.bank_name
     && vForm.signatory_name && vForm.signatory_title;
   const userComplete = selected && uForm.full_name && uForm.job_title
-    && uForm.email && uForm.phone && uForm.roles.length && uForm.password.length >= 12;
+    && uForm.email && uForm.phone && uForm.roles.length && uForm.password.length >= MIN_LENGTH;
 
   async function addVendor(e) {
     e.preventDefault();
@@ -114,6 +115,27 @@ export default function Vendors() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
     } finally { setBusy(false); }
+  }
+
+  // No email delivery yet, so a reset is handed over in person. The account is
+  // flagged and the owner must replace it before doing anything else.
+  async function resetPassword(u) {
+    const next = prompt(
+      `New password for ${u.full_name}.
+
+${PASSWORD_HINT}
+
+`
+      + 'They will have to change it the first time they sign in, so read it out '
+      + 'rather than writing it down.');
+    if (!next) return;
+    setError(null); setOk(null); setBusyId(`u${u.id}`);
+    try {
+      await api.resetPassword(u.id, next);
+      setOk(`Password set for ${u.full_name}. They must change it at next sign-in.`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
+    } finally { setBusyId(null); }
   }
 
   async function toggleUser(u) {
@@ -167,6 +189,10 @@ export default function Vendors() {
                 <Td dim>{(u.roles || []).join(', ')}</Td>
                 <Td dim>{off ? 'removed' : 'active'}</Td>
                 <Td right>
+                  <button disabled={busyId === `u${u.id}`} onClick={() => resetPassword(u)}
+                          style={{ ...button('ghost', busyId === `u${u.id}`), marginRight: 6 }}>
+                    Reset password
+                  </button>
                   <button disabled={busyId === `u${u.id}`} onClick={() => toggleUser(u)}
                           style={button('ghost', busyId === `u${u.id}`)}>
                     {off ? 'Restore' : 'Remove'}
@@ -201,13 +227,13 @@ export default function Vendors() {
                 ))}
               </div>
             </Field>
-            <Field label="Password" hint="At least 12 characters. Used until SSO takes over.">
+            <Field label="Password" hint={PASSWORD_HINT}>
               <input style={inputStyle} type="password" value={cForm.password} onChange={setC('password')} />
             </Field>
           </div>
           <button type="submit"
-                  disabled={busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < 12}
-                  style={button('primary', busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < 12)}>
+                  disabled={busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < MIN_LENGTH}
+                  style={button('primary', busy || !cForm.full_name || !cForm.email || !cForm.roles.length || cForm.password.length < MIN_LENGTH)}>
             Add user
           </button>
         </form>
@@ -422,7 +448,7 @@ export default function Vendors() {
                     ))}
                   </div>
                 </Field>
-                <Field label="Temporary password" hint="At least 12 characters.">
+                <Field label="Password" hint={PASSWORD_HINT}>
                   <input style={inputStyle} type="password" value={uForm.password} onChange={setU('password')} />
                 </Field>
               </div>

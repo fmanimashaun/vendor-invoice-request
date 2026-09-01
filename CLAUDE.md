@@ -298,6 +298,46 @@ for a fresh database only. Nothing at runtime reads them.
 `length()` check anywhere, and do not let a ref parser assume `[A-Z]{3}` — split
 on `/`.
 
+## Passwords and provisioning
+
+**Provisioning is manual until SSO goes live.** A client admin creates every
+account, client and vendor alike, with a password. SSO auto-provisioning only
+starts once single sign-on is configured and proven — see the cutover in Auth.
+
+**Policy lives in `shared/password.js`** so the form and the server cannot
+disagree. Length is the rule: 12 characters minimum, and deliberately **no
+composition requirements**. Demanding an uppercase and a symbol pushes people
+to `Password1!` — short, predictable, in every wordlist — and away from a long
+passphrase. NIST 800-63B dropped composition rules for this reason.
+
+What is rejected instead: too short, barely any variety, keyboard runs, and a
+small blocklist of what people actually type. Two subtleties worth keeping:
+
+- The blocklist matches the **whole** password after stripping decoration, not
+  a substring. `a-long-enough-password` is a fine passphrase; `Password1!` and
+  `P@ssw0rd` are not. Substring matching rejected the first, which is wrong.
+- The identity check asks whether the email or name is doing the **work** —
+  remove it and see whether enough is left. `samantha@client.example` as a
+  password fails; `a brand new passphrase here` for someone at `phrase@…` does
+  not, and rejecting it would be baffling.
+
+### Resets are manual
+
+There is no email delivery, so an admin sets a temporary password and hands it
+over in person. Because the admin then knows it, the account is flagged
+`must_change_password` and **everything is closed** until the owner replaces
+it, bar the routes needed to do so (`/api/bootstrap`, `/api/me`,
+`/api/auth/password`, `/api/auth/logout`).
+
+That gate sits **directly after authentication**, not at the bottom of the
+router. It was first written below the business routes, where it caught only
+unmatched paths and protected nothing. A guard placed after the routes it
+guards is not a guard.
+
+An admin cannot reset their own password through that route — changing your own
+requires the current one, so an unattended session cannot be used to take an
+account over.
+
 ## Auth
 
 - **client admins** see two pages only: the request table, read-only, and the

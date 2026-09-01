@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS users (
   pw_hash       TEXT,
   pw_salt       TEXT,
   pw_iterations INTEGER,
+  -- Set when an admin resets someone's password. The admin necessarily knows
+  -- the temporary one they just typed, so it is not a secret until the owner
+  -- has replaced it; the app makes them do that before anything else.
+  --
+  -- There is no email delivery yet, so resets are handed over in person or on
+  -- a call. When email is wired up this flag is what a reset link would clear.
+  must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1)),
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   created_by    TEXT NOT NULL DEFAULT 'seed',
 

@@ -18,6 +18,7 @@ import {
 import { renderInvoice } from './renderInvoice.js';
 import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE } from '../shared/template.js';
 import { FONT_CATALOGUE, fontKeys, REQUIRED_GLYPHS, FALLBACK_FONT } from '../shared/fonts.js';
+import { checkPassword, PASSWORD_HINT } from '../shared/password.js';
 import fontkit from '@pdf-lib/fontkit';
 import {
   REQUEST_TYPES,
@@ -108,6 +109,21 @@ async function route(request, env, url) {
   if (!auth) return fail('unauthenticated', 'Sign in to continue.', 401);
   const me = auth.user;
 
+  // An account whose password an admin has just set is in a half-state: the
+  // admin necessarily knows the secret, so it is not one yet. Everything is
+  // closed until the owner replaces it, EXCEPT the handful of routes needed to
+  // do that — the app has to be able to load and render the form.
+  //
+  // This sits directly after authentication rather than further down, because
+  // a guard placed after the routes it is meant to guard protects nothing.
+  const OPEN_WHILE_LOCKED = new Set([
+    '/api/bootstrap', '/api/me', '/api/auth/password', '/api/auth/logout',
+  ]);
+  if (me.must_change_password && !OPEN_WHILE_LOCKED.has(path)) {
+    return fail('password_change_required',
+      'Set a new password before continuing.', 403);
+  }
+
   if (path === '/api/auth/context' && method === 'POST') {
     const me = await authenticate(request, env);
     if (!me) return fail('unauthorised', 'Sign in first.', 401);
@@ -139,6 +155,8 @@ async function route(request, env, url) {
       buSites: ref.buSites,
       requestTypes: REQUEST_TYPES,
       orgName: cfg?.org_name || '',
+      mustChangePassword: !!me.must_change_password,
+      passwordHint: PASSWORD_HINT,
       feeKobo: cfg?.default_fee_kobo ?? 10000,
       feeIsIndicative: true,
       config: vendorCfg || undefined,
@@ -191,6 +209,11 @@ async function route(request, env, url) {
   if (path === '/api/users'  && method === 'POST') return createUser(request, env, me);
   if ((m = path.match(/^\/api\/users\/(\d+)\/status$/)) && method === 'POST')
     return setUserStatus(request, env, me, Number(m[1]));
+  if ((m = path.match(/^\/api\/users\/(\d+)\/password$/)) && method === 'POST')
+    return resetUserPassword(request, env, me, Number(m[1]));
+  if (path === '/api/auth/password' && method === 'POST')
+    return changeOwnPassword(request, env, me);
+
 
   return fail('not_found', 'No such route.', 404);
 }
@@ -203,6 +226,7 @@ const publicUser = (u) => ({
   vendor_id: u.vendor_id, vendor_name: u.vendor_name, vendor_code: u.vendor_code,
   job_title: u.job_title, phone: u.phone,
   status: u.status, created_at: u.created_at, created_by: u.created_by,
+  must_change_password: !!u.must_change_password,
 });
 
 const requireOrg = (me, org) =>
@@ -891,6 +915,82 @@ async function deleteFont(env, me, key) {
   return json({ ok: true });
 }
 
+/**
+ * An admin sets someone else's password.
+ *
+ * There is no email delivery, so this is the reset path: the admin sets a
+ * temporary password and hands it over in person or on a call. Because the
+ * admin now knows it, the account is flagged and the owner has to replace it
+ * before they can do anything else.
+ *
+ * Deliberately not usable on your own account — that is changeOwnPassword,
+ * which requires the current password. Otherwise an unattended session would
+ * be enough to lock the real owner out.
+ */
+async function resetUserPassword(request, env, me, id) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  if (id === me.id) {
+    return fail('bad_request',
+      'Use the change-password form for your own account; it asks for your current one.');
+  }
+
+  const target = await env.DB.prepare('SELECT * FROM users WHERE id = ?1').bind(id).first();
+  if (!target) return fail('not_found', 'No such user.', 404);
+
+  const b = await request.json().catch(() => ({}));
+  const errs = checkPassword(b.password, { email: target.email, name: target.full_name });
+  if (errs.length) {
+    return fail('weak_password', errs[0], 422, { errors: errs, hint: PASSWORD_HINT });
+  }
+
+  const pw = await hashPassword(String(b.password));
+  await env.DB.prepare(
+    `UPDATE users SET pw_hash = ?1, pw_salt = ?2, pw_iterations = ?3,
+            must_change_password = 1
+      WHERE id = ?4`,
+  ).bind(pw.hash, pw.salt, pw.iterations, id).run();
+
+  console.warn('PASSWORD_RESET_BY_ADMIN', me.email, target.email);
+  return json({ ok: true, mustChange: true });
+}
+
+/**
+ * Change your own password. Requires the current one, so a session left open
+ * on someone's desk cannot be used to take the account over.
+ */
+async function changeOwnPassword(request, env, me) {
+  const b = await request.json().catch(() => ({}));
+  const current = String(b.current_password || '');
+
+  const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?1').bind(me.id).first();
+  if (!row?.pw_hash) {
+    return fail('forbidden', 'This account signs in through single sign-on.', 403);
+  }
+  if (!(await verifyPassword(current, row))) {
+    return fail('bad_credentials', 'Your current password is incorrect.', 401);
+  }
+
+  const errs = checkPassword(b.password, { email: me.email, name: me.full_name });
+  if (errs.length) {
+    return fail('weak_password', errs[0], 422, { errors: errs, hint: PASSWORD_HINT });
+  }
+  if (String(b.password) === current) {
+    return fail('bad_request', 'That is the password you already have.');
+  }
+
+  const pw = await hashPassword(String(b.password));
+  await env.DB.prepare(
+    `UPDATE users SET pw_hash = ?1, pw_salt = ?2, pw_iterations = ?3,
+            must_change_password = 0
+      WHERE id = ?4`,
+  ).bind(pw.hash, pw.salt, pw.iterations, me.id).run();
+
+  console.warn('PASSWORD_CHANGED', me.email);
+  return json({ ok: true });
+}
+
 async function listVendors(env, me) {
   const denied = requireRosterAdmin(me);
   if (denied) return denied;
@@ -1124,8 +1224,9 @@ async function createUser(request, env, me) {
   // Client staff get a password too. Once SSO is set up and proven, it stops
   // working for them and the identity provider takes over; until then it is
   // the only way in, and a deployment has to be usable before SSO exists.
-  if (!b.password || String(b.password).length < 12) {
-    return fail('bad_request', 'A password of at least 12 characters is required.');
+  const pwErrs = checkPassword(b.password, { email, name: b.full_name });
+  if (pwErrs.length) {
+    return fail('weak_password', pwErrs[0], 422, { errors: pwErrs, hint: PASSWORD_HINT });
   }
   const pw = await hashPassword(String(b.password));
 

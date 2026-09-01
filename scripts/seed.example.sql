@@ -37,8 +37,14 @@ INSERT OR IGNORE INTO bu_sites (bu_code, site_code) VALUES
 -- and staff are provisioned automatically on first sign-in.
 --
 -- If you will use SSO, this email must match what your IdP asserts.
-INSERT OR IGNORE INTO users (email, full_name, org, roles) VALUES
-  ('admin@example.com', 'First Admin', 'client', 'admin,member');
+-- 'admin' only: administering the platform and raising payment requests are
+-- separate jobs, and this account does not need to do the second. Give staff
+-- who do both 'admin,member' and they switch context in the app.
+--
+-- No password here. Create one so you can sign in before SSO exists:
+--   node scripts/add-user.mjs client admin@example.com "First Admin" --        admin 'a-long-password' > /tmp/admin.sql
+INSERT OR IGNORE INTO users (email, full_name, org, roles, default_role) VALUES
+  ('admin@example.com', 'First Admin', 'client', 'admin', 'admin');
 
 -- Vendors are onboarded in the app rather than seeded: they need bank details,
 -- a signatory, optional tax settings, and letterhead artwork uploaded to KV

@@ -94,6 +94,19 @@ export default function App() {
 
   if (loading) return <Centre>Loading…</Centre>;
   if (fatal)   return <Centre><span style={{ color: T.red }}>{fatal}</span></Centre>;
+  // An admin has just set this password, so the admin knows it. Nothing else
+  // is reachable until the owner replaces it — the server enforces that too.
+  if (boot?.mustChangePassword) {
+    return <ChangePassword hint={boot.passwordHint} onDone={async () => {
+      setLoading(true);
+      const b = await load();
+      const ctx = b.user.context;
+      setContext(ctx);
+      setTab(firstTab(b.user, ctx));
+      setLoading(false);
+    }} />;
+  }
+
   if (!boot)   return <Login onDone={async () => {
     setLoading(true);
     const b = await load();
@@ -222,6 +235,57 @@ export default function App() {
           />
         )}
       </main>
+    </div>
+  );
+}
+
+function ChangePassword({ hint, onDone }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null); setBusy(true);
+    try {
+      await api.changePassword(current, next);
+      await onDone();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight: '100vh', background: T.bg, color: T.text, font: `15px ${FONT}`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+    }}>
+      <div style={{ width: '100%', maxWidth: 420 }}>
+        <h1 style={{ font: `700 20px ${FONT}`, margin: '0 0 6px' }}>Choose a password</h1>
+        <p style={{ color: T.textDim, fontSize: 14, margin: '0 0 22px', lineHeight: 1.5 }}>
+          An administrator set your current password, so they know it. Pick your
+          own before carrying on.
+        </p>
+        <Card>
+          <Banner onClose={() => setError(null)}>{error}</Banner>
+          <form onSubmit={submit}>
+            <Field label="Current password">
+              <input style={inputStyle} type="password" autoFocus value={current}
+                     onChange={(e) => setCurrent(e.target.value)} />
+            </Field>
+            <Field label="New password" hint={hint}>
+              <input style={inputStyle} type="password" value={next}
+                     onChange={(e) => setNext(e.target.value)} />
+            </Field>
+            <button type="submit" disabled={busy || !current || !next}
+                    style={{ ...button('primary', busy || !current || !next), width: '100%' }}>
+              {busy ? 'Saving…' : 'Save and continue'}
+            </button>
+          </form>
+        </Card>
+      </div>
     </div>
   );
 }
