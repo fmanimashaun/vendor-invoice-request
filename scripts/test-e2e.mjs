@@ -1277,9 +1277,11 @@ DB.db.prepare(
 ).run('adminonly@client.example', 'Admin Only', 'client', 'admin',
       adminOnlyPw.hash, adminOnlyPw.salt, adminOnlyPw.iterations);
 await sessionFor('adminonly', 'adminonly@client.example');
+// A different amount from the request above, so this assertion can only ever
+// fail on the role check and never on the duplicate guard.
 r = await call('adminonly', '/api/requests', { method: 'POST', body: {
   bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733', period: '2026-10',
-  amount_kobo: 100000, description: 'Should not be allowed',
+  amount_kobo: 123456, description: 'Should not be allowed',
 } });
 check('an admin without member cannot raise a request', r.status === 403, JSON.stringify(r.data));
 
