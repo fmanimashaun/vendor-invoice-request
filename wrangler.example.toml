@@ -16,12 +16,22 @@ compatibility_date = "2026-01-15"
 # most recent table header, so putting this further down makes wrangler read
 # it as a field of that table and ignore it — with only a warning.
 #
-# Uncomment once the zone is ACTIVE in this Cloudflare account. Deploying
-# before then fails: the route cannot be provisioned without the zone.
-# `custom_domain = true` creates the DNS record and the certificate for you.
+# NOTE: this key does not currently reach Cloudflare. The build runs through
+# the Cloudflare Vite plugin, which generates its own config at
+# dist/<name>/wrangler.json and drops `routes` on the way. `wrangler deploy`
+# then reports only the workers.dev trigger and the custom domain is never
+# touched — no error, no warning. Check for yourself before believing a
+# deploy bound anything:
+#
+#   grep routes dist/<worker-name>/wrangler.json
+#
+# So bind the custom domain in the dashboard instead: Workers & Pages -> the
+# Worker -> Settings -> Domains & Routes -> Add -> Custom domain. That creates
+# the DNS record and the certificate, and it survives deploys. Keep the block
+# below for the day the plugin passes it through, but do not rely on it.
 #
 # routes = [
-#   { pattern = "app.vendor-invoice-request.com.ng", custom_domain = true }
+#   { pattern = "app.example.com", custom_domain = true }
 # ]
 #
 # Once it resolves, disable the workers.dev route so the app has one address.

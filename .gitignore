@@ -21,3 +21,6 @@ scripts/seed.local.sql
 # Deployment configuration: resource ids, Access team domain, AUD tag.
 # Copy wrangler.example.toml to wrangler.toml and fill in your own.
 wrangler.toml
+
+# One-off production repair scripts. Deployment-specific, never committed.
+*.sql.local
