@@ -85,14 +85,18 @@ export class D1Shim {
 /** Minimal KV: get(key, 'arrayBuffer'). */
 export class KVShim {
   constructor(map = new Map()) { this.map = map; }
+  // Real KV takes a string or bytes and hands back whichever the caller asks
+  // for. The shim used to assume bytes, which worked while the only values
+  // were fonts and artwork and broke the moment something stored a string.
   put(key, value) { this.map.set(key, value); }
   async get(key, type) {
     const v = this.map.get(key);
     if (v == null) return null;
+    const bytes = typeof v === 'string' ? new TextEncoder().encode(v) : v;
     if (type === 'arrayBuffer') {
-      return v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     }
-    return new TextDecoder().decode(v);
+    return typeof v === 'string' ? v : new TextDecoder().decode(v);
   }
   async delete(key) { this.map.delete(key); }
   async list({ prefix = '' } = {}) {

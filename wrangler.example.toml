@@ -11,6 +11,21 @@ name = "vendor-invoice-request"
 main = "worker/worker.js"
 compatibility_date = "2026-01-15"
 
+# ── Custom domain ──────────────────────────────────────────────────────
+# MUST stay above the first [[table]] below. TOML assigns a bare key to the
+# most recent table header, so putting this further down makes wrangler read
+# it as a field of that table and ignore it — with only a warning.
+#
+# Uncomment once the zone is ACTIVE in this Cloudflare account. Deploying
+# before then fails: the route cannot be provisioned without the zone.
+# `custom_domain = true` creates the DNS record and the certificate for you.
+#
+# routes = [
+#   { pattern = "app.vendor-invoice-request.com.ng", custom_domain = true }
+# ]
+#
+# Once it resolves, disable the workers.dev route so the app has one address.
+
 [assets]
 directory = "./dist"
 binding = "ASSETS"
@@ -24,18 +39,6 @@ database_id = "REPLACE_WITH_YOUR_D1_ID"
 [[kv_namespaces]]
 binding = "ASSETS_KV"
 id = "REPLACE_WITH_YOUR_KV_ID"
-
-# ── Custom domain ──────────────────────────────────────────────────────
-# Uncomment once the zone is ACTIVE in this Cloudflare account (nameservers
-# moved at the registrar and Cloudflare showing the domain as Active).
-# Deploying before then fails: the route cannot be provisioned without the zone.
-#
-# `custom_domain = true` makes Cloudflare create the DNS record and the TLS
-# certificate for you. There is nothing to add by hand.
-#
-# routes = [
-#   { pattern = "app.vendor-invoice-request.com.ng", custom_domain = true }
-# ]
 #
 # Once it resolves, turn the workers.dev URL off so the app has exactly one
 # address — Workers & Pages -> the Worker -> Settings -> Domains & Routes ->

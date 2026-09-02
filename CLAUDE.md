@@ -125,6 +125,25 @@ BU / SITE / YYYY / MON / NNN        RFC/GBG/2026/SEP/001
   `numberingSite` supplies the ref segment. Storing the fallback site as if it
   were real would put all of RFC's staff-data spend on Lekki in any per-site
   report.
+- **The counter must never go backwards, and D1 alone cannot guarantee that.**
+  `seq` comes from `MAX(seq)` over `invoices`; empty that table and the counter
+  restarts. Re-issuing `RFC/GBG/2026/SEP/001` after a mid-month rebuild is not
+  untidy, it is **rejected by the downstream approvals system**, which already
+  holds that number — and a legitimate payment is blocked.
+
+  So a per-scope high-water mark lives in **KV**, a different store from D1: a
+  dropped or restored database does not take it with it. It is a floor, never
+  an authority — D1 remains the source of truth while intact, the UNIQUE
+  indexes are still what prevent duplicates, and a KV failure logs
+  `SEQ_WATERMARK_READ_FAILED` and carries on rather than blocking issuance.
+
+  Keeping the sequence rather than switching to a timestamp is deliberate: a
+  sequence lets an auditor see that 003 is missing. A timestamp has no gaps
+  because every value is arbitrary, which throws away the property the
+  numbering exists for.
+
+  If you ever restore D1 from a backup, do **not** clear those KV keys.
+
 - The ref is a **derived display string**. `period` is its own sortable column;
   never sort or range-query on the ref text.
 - Year before month so a plain text sort in Excel comes out chronological.
@@ -397,12 +416,17 @@ account over.
   `VENDOR_ROLES` is `['approver']`. The client admin onboards vendors, adds
   their reps, and maintains their bank, signatory and tax details.
 
-  The trade this makes is real and worth stating: where money lands is the
-  highest-risk mutable field in the system, and it now sits inside the client's
-  own blast radius. A compromised admin session could redirect a vendor's
-  payments and the invoice would look legitimate, because the details are
-  copied at issue. `BANK_DETAILS_CHANGED` exists so the change is visible
-  afterwards — wire it to a real notification before go-live.
+  Bank details are still the most sensitive field here, and `BANK_DETAILS_CHANGED`
+  logs every change — but do not overstate what an invoice can do. **It is not
+  a payment instruction.** Finance holds the vendor's bank details in their own
+  records and pays against those, not against whatever a PDF says; an invoice
+  carrying a changed account number gets queried, not paid. Anyone can forge a
+  PDF outside this system entirely, which is the same reason the document's
+  value is as tax evidence rather than as authority to move money.
+
+  So the reason to log the change is traceability, not fraud prevention. Do not
+  design controls here on the assumption that this app decides where money
+  goes. It does not.
 
 - **The client admin cannot approve, reject, or download an invoice.**
   Those routes require `org = 'vendor'`. The document is worth nothing as audit

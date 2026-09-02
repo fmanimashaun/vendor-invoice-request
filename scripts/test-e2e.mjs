@@ -1147,6 +1147,70 @@ r = await call('anon', '/api/auth/login', { method: 'POST', body: {
   email: 'phrase@client.example', password: 'a brand new passphrase here' } });
 check('the new password signs in', r.status === 200, JSON.stringify(r.data));
 
+results.push('\nInvoice numbers survive a database rebuild');
+
+// The scenario: the database is rebuilt mid-month. Without a floor the counter
+// restarts and re-issues a number the downstream approvals system already
+// holds, which rejects it and blocks a legitimate payment.
+const scope = DB.db.prepare(
+  'SELECT bu_code, site_code, period FROM invoices ORDER BY id LIMIT 1').get();
+const mark = `seq/${scope.bu_code}/${scope.site_code}/${scope.period}`;
+const issuedSeqs = DB.db.prepare(
+  'SELECT seq FROM invoices WHERE bu_code=? AND site_code=? AND period=? ORDER BY seq',
+).all(scope.bu_code, scope.site_code, scope.period).map((r) => r.seq);
+const highest = Math.max(...issuedSeqs);
+
+check('the mark tracks the highest number issued in a scope',
+  Number(await kv.get(mark)) === highest, `${await kv.get(mark)} vs ${highest}`);
+
+// Wipe the invoices table, exactly as a rebuild would. KV is a separate store
+// and is deliberately left intact.
+const wiped = DB.db.prepare('SELECT * FROM invoices').all();
+DB.db.exec('DELETE FROM invoices');
+check('the invoice table is empty, as after a rebuild',
+  DB.db.prepare('SELECT COUNT(*) c FROM invoices').get().c === 0);
+
+// Raise a fresh request in that same scope and approve it.
+const reqAfter = DB.db.prepare(
+  `INSERT INTO requests (request_ref, bu_code, site_code, type_code, period, asset_key,
+     addressee, addressee_loc, subject, narrative, description,
+     fee_kobo, amount_kobo, total_kobo, created_by)
+   VALUES ('REQ-REBUILD', ?, ?, 'ELEC', ?, '04599999999', 'A', 'Lagos.', 'S', 'N', 'D',
+           10000, 500000, 510000, 4) RETURNING id`,
+).get(scope.bu_code, scope.site_code, scope.period);
+
+r = await call('victor', `/api/requests/${reqAfter.id}/approve`, { method: 'POST' });
+check('an invoice can still be issued after the rebuild', r.status === 201, JSON.stringify(r.data));
+const reissued = DB.db.prepare('SELECT seq FROM invoices WHERE request_id = ?')
+  .get(reqAfter.id)?.seq;
+check('and it does NOT reuse a number already issued',
+  !issuedSeqs.includes(reissued), `got seq ${reissued}, previously issued ${issuedSeqs}`);
+check('it continues from the high-water mark', reissued === highest + 1,
+  `${reissued} vs ${highest + 1}`);
+
+// Put the invoices back so later assertions see the world they expect.
+DB.db.exec('DELETE FROM invoices');
+const cols = Object.keys(wiped[0]);
+const ins = DB.db.prepare(
+  `INSERT INTO invoices (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
+for (const row of wiped) ins.run(...cols.map((c) => row[c]));
+check('the fixture invoices are restored for later assertions',
+  DB.db.prepare('SELECT COUNT(*) c FROM invoices').get().c === wiped.length);
+
+// KV being unavailable must degrade, not block: an invoice still has to issue.
+const realGet = kv.get.bind(kv);
+kv.get = async () => { throw new Error('KV down'); };
+const reqDegraded = DB.db.prepare(
+  `INSERT INTO requests (request_ref, bu_code, site_code, type_code, period, asset_key,
+     addressee, addressee_loc, subject, narrative, description,
+     fee_kobo, amount_kobo, total_kobo, created_by)
+   VALUES ('REQ-KVDOWN', 'REX', 'LEK', 'ELEC', '2026-07', '04588888888', 'A', 'Lagos.', 'S', 'N', 'D',
+           10000, 500000, 510000, 4) RETURNING id`).get();
+r = await call('victor', `/api/requests/${reqDegraded.id}/approve`, { method: 'POST' });
+check('an invoice still issues when the mark cannot be read', r.status === 201,
+  JSON.stringify(r.data));
+kv.get = realGet;
+
 results.push('\nDashboard summary');
 
 r = await call('reladmin', '/api/summary?from=2020-01-01&to=2030-12-31');

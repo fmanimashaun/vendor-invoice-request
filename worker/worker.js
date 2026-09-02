@@ -1836,6 +1836,39 @@ async function rejectRequest(request, env, me, id) {
   return json({ ok: true });
 }
 
+/**
+ * Per-scope high-water mark for invoice sequences, kept in KV.
+ *
+ * Nothing stored inside D1 can protect a sequence from D1 being rebuilt, and a
+ * reused invoice number is rejected by the downstream approvals system, which
+ * blocks a legitimate payment. KV is a separate store, so it survives that.
+ *
+ * This is a floor, never an authority: the sequence still comes from
+ * `invoices`, and the UNIQUE indexes are still what actually prevent a
+ * duplicate. If KV is unavailable the mark reads as 0 and issuing carries on
+ * from D1 — degraded, not blocked.
+ */
+const seqWatermarkKey = (bu, site, period) => `seq/${bu}/${site}/${period}`;
+
+async function seqWatermark(env, key) {
+  try {
+    const v = await env.ASSETS_KV.get(key);
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  } catch (e) {
+    console.warn('SEQ_WATERMARK_READ_FAILED', key, String(e));
+    return 0;
+  }
+}
+
+async function bumpSeqWatermark(env, key, seq) {
+  try {
+    if (seq > await seqWatermark(env, key)) await env.ASSETS_KV.put(key, String(seq));
+  } catch (e) {
+    console.warn('SEQ_WATERMARK_WRITE_FAILED', key, seq, String(e));
+  }
+}
+
 // ── Approval: the only place an invoice number is created ──────────────
 
 async function approveRequest(env, me, id) {
@@ -1872,13 +1905,23 @@ async function approveRequest(env, me, id) {
   // Optimistic reservation. If two approvers race, the UNIQUE indexes on
   // invoice_no and (bu, site, period, seq) reject the loser and we retry with
   // a fresh sequence. We never guess a number after a failure.
+  const mark = seqWatermarkKey(req.bu_code, site, req.period);
   for (let attempt = 0; attempt < 4; attempt++) {
     const { seq: maxSeq } = (await env.DB.prepare(
       `SELECT COALESCE(MAX(seq), 0) AS seq FROM invoices
         WHERE bu_code = ?1 AND site_code = ?2 AND period = ?3`,
     ).bind(req.bu_code, site, req.period).first()) || { seq: 0 };
 
-    const seq = maxSeq + 1;
+    // The counter must never go backwards, even if `invoices` is emptied.
+    //
+    // A number that has been issued is already in the downstream approvals
+    // system, which rejects a repeat — so re-issuing RFC/GBG/2026/SEP/001
+    // after a mid-month rebuild does not just look untidy, it blocks payment.
+    //
+    // The high-water mark therefore lives in KV, a different store from D1: a
+    // dropped or restored database does not take it with it. D1 remains the
+    // source of truth when it is intact, so this only ever raises the floor.
+    const seq = Math.max(maxSeq, await seqWatermark(env, mark)) + 1;
     const invoice_no = invoiceRef({ bu_code: req.bu_code, site_code: site, period: req.period, seq });
 
     try {
@@ -1911,6 +1954,12 @@ async function approveRequest(env, me, id) {
 
       // Guard against approving something another approver just decided.
       if (!updated.meta.changes) return fail('conflict', 'That request was just decided by someone else.', 409);
+
+      // Raise the mark only after the row is committed, so a failed attempt
+      // never burns a number. A failure here is logged and swallowed: the
+      // invoice exists and must be returned, and D1 still holds the sequence
+      // for as long as it is intact.
+      await bumpSeqWatermark(env, mark, seq);
 
       return json({ invoice_no, download: downloadName(invoice_no) }, 201);
     } catch (e) {
