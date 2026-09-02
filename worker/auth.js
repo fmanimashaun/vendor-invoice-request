@@ -88,10 +88,19 @@ export async function signSession(payload, secret) {
 
 export async function readSession(token, secret) {
   if (!token || !token.includes('.')) return null;
-  const [data, sig] = token.split('.');
-  const ok = await crypto.subtle.verify('HMAC', await hmacKey(secret), b64uDecode(sig), enc.encode(data));
-  if (!ok) return null;
+  // EVERYTHING here is inside the try, decoding included. A cookie is
+  // attacker-controlled input: `session=a.b.c` has the right shape but is not
+  // valid base64, and atob throws on it. That throw used to escape and surface
+  // as a 500 — so anyone holding a corrupted cookie, which is what a stale one
+  // looks like after a rotation, got a server error instead of a login screen.
+  // An unreadable cookie means not signed in. There is no other answer.
   try {
+    const [data, sig] = token.split('.');
+    if (!data || !sig) return null;
+    const ok = await crypto.subtle.verify(
+      'HMAC', await hmacKey(secret), b64uDecode(sig), enc.encode(data),
+    );
+    if (!ok) return null;
     const body = JSON.parse(new TextDecoder().decode(b64uDecode(data)));
     if (!body.exp || body.exp < Math.floor(Date.now() / 1000)) return null;
     return body;

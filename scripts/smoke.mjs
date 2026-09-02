@@ -1,0 +1,206 @@
+#!/usr/bin/env node
+/**
+ * Smoke-test a DEPLOYED instance over HTTP.
+ *
+ * `npm test` runs the Worker handler in-process against a SQLite shim. It
+ * proves the logic and it cannot prove the deployment: a stale database, a
+ * missing KV binding, an asset that never uploaded, a route bound to nothing
+ * all pass every one of those 340 assertions and still give you a white page.
+ * This walks the real thing over the wire.
+ *
+ * READ-ONLY, deliberately. It signs in and reads; it never creates a request,
+ * never approves one, never writes config. A test that issues an invoice
+ * against production burns a number out of the live sequence, and that number
+ * is what the downstream approvals system keys on. If you extend this, keep it
+ * to GETs.
+ *
+ *   SMOKE_EMAIL=admin@example.com SMOKE_PASSWORD=... \
+ *     node scripts/smoke.mjs https://app.example.com
+ *
+ * Credentials come from the environment so they stay out of the repo and out
+ * of your shell history. Without them it runs the unauthenticated checks only,
+ * which is still enough to catch a dead deployment.
+ */
+const BASE = (process.argv[2] || process.env.SMOKE_URL || '').replace(/\/+$/, '');
+const EMAIL = process.env.SMOKE_EMAIL;
+const PASSWORD = process.env.SMOKE_PASSWORD;
+// Long enough to clear a cold start, short enough that a hang reports as a
+// hang instead of sitting there looking like slow work.
+const TIMEOUT_MS = Number(process.env.SMOKE_TIMEOUT || 20000);
+
+if (!BASE) {
+  console.error('usage: node scripts/smoke.mjs https://app.example.com');
+  process.exit(2);
+}
+
+let cookie = '';
+let pass = 0;
+const failures = [];
+
+const ok   = (m) => { pass++; console.log(`  \x1b[32mok\x1b[0m   ${m}`); };
+const bad  = (m) => { failures.push(m); console.log(`  \x1b[31mFAIL\x1b[0m ${m}`); };
+const head = (m) => console.log(`\n\x1b[1m${m}\x1b[0m`);
+
+async function req(path, { method = 'GET', body } = {}) {
+  const started = Date.now();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method,
+      signal: ctl.signal,
+      redirect: 'manual',
+      headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(cookie ? { cookie } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    // Keep the session for later calls.
+    const set = res.headers.get('set-cookie');
+    if (set) cookie = set.split(';')[0];
+    const type = res.headers.get('content-type') || '';
+    const data = type.includes('json') ? await res.json().catch(() => null) : null;
+    const bytes = data ? 0 : (await res.arrayBuffer().catch(() => new ArrayBuffer(0))).byteLength;
+    return { status: res.status, data, bytes, type, ms: Date.now() - started };
+  } catch (err) {
+    return {
+      status: 0, data: null, bytes: 0, type: '', ms: Date.now() - started,
+      error: err.name === 'AbortError' ? `no response in ${TIMEOUT_MS}ms` : err.message,
+    };
+  } finally { clearTimeout(timer); }
+}
+
+/** Assert a status, and say what came back when it is not the one wanted. */
+async function expect(label, path, want, opts) {
+  const r = await req(path, opts);
+  const wants = Array.isArray(want) ? want : [want];
+  const detail = r.error ? ` — ${r.error}`
+    : ` — ${r.data?.error ? `${r.data.error}: ${r.data.message}` : `${r.bytes} bytes`}`;
+  if (wants.includes(r.status)) ok(`${label} (${r.status}, ${r.ms}ms)`);
+  else bad(`${label} — wanted ${wants.join(' or ')}, got ${r.status}${detail}`);
+  return r;
+}
+
+const run = async () => {
+  console.log(`\nSmoke test: ${BASE}`);
+
+  head('Reachable, and serving the app');
+  const page = await req('/');
+  if (page.status === 200) ok(`index.html (${page.status}, ${page.ms}ms)`);
+  else bad(`index.html — got ${page.status}${page.error ? ` — ${page.error}` : ''}`);
+
+  head('Public routes');
+  const methods = await expect('GET /api/auth/methods', '/api/auth/methods', 200);
+  if (methods.data) {
+    const m = methods.data;
+    // The login screen renders off this. If neither method is on, nobody can
+    // sign in and the app is a white page with no way forward.
+    if (m.password || m.sso) ok(`a sign-in method is enabled (password=${!!m.password} sso=${!!m.sso})`);
+    else bad('NO sign-in method is enabled — nobody can get in');
+  }
+
+  head('Session is actually required');
+  // If any of these answer 200 without a cookie, the auth gate is not doing
+  // its job and every request in the system is public.
+  await expect('GET /api/bootstrap  unauthenticated', '/api/bootstrap', 401);
+  await expect('GET /api/requests   unauthenticated', '/api/requests', 401);
+  await expect('GET /api/vendors    unauthenticated', '/api/vendors', 401);
+
+  if (!EMAIL || !PASSWORD) {
+    head('Signed-in checks skipped');
+    console.log('  set SMOKE_EMAIL and SMOKE_PASSWORD to run them');
+    return;
+  }
+
+  head(`Signing in as ${EMAIL}`);
+  const login = await req('/api/auth/login', {
+    method: 'POST', body: { email: EMAIL, password: PASSWORD },
+  });
+  if (login.status !== 200 || !cookie) {
+    bad(`login — ${login.status}${login.error ? ` ${login.error}` : ''}`
+      + `${login.data ? ` ${login.data.error}: ${login.data.message}` : ''}`);
+    return;
+  }
+  ok(`login (${login.ms}ms)`);
+  const user = login.data?.user || {};
+  console.log(`       ${user.full_name} · ${user.org} · roles=${(user.roles || []).join()}`
+    + ` · acting=${user.context}`);
+
+  head('What the app calls on boot');
+  // This is the exact sequence App.jsx runs before it will render anything.
+  // A white "Loading…" screen means one of these never came back.
+  const boot = await expect('GET /api/bootstrap', '/api/bootstrap', 200);
+  await expect('GET /api/requests', '/api/requests', 200);
+  await expect('GET /api/me', '/api/me', 200);
+
+  if (boot.data) {
+    const b = boot.data;
+    // Each of these is something App.jsx or a tab reads without checking.
+    const shape = [
+      ['user', b.user],
+      ['user.context', b.user?.context],
+      ['user.roles', b.user?.roles?.length ? b.user.roles : null],
+      ['config', b.config],
+      ['reference.businessUnits', b.reference?.businessUnits],
+      ['reference.sites', b.reference?.sites],
+      ['reference.types', b.reference?.types],
+    ];
+    for (const [name, v] of shape) {
+      if (v === undefined || v === null) bad(`bootstrap is missing ${name}`);
+      else ok(`bootstrap carries ${name}`);
+    }
+    // An empty reference table is not a crash, but the request form has
+    // nothing to offer and the first user to open it thinks the app is broken.
+    const bus = b.reference?.businessUnits?.length ?? 0;
+    const sites = b.reference?.sites?.length ?? 0;
+    if (bus && sites) ok(`reference is populated (${bus} units, ${sites} sites)`);
+    else bad(`reference is EMPTY (${bus} units, ${sites} sites) — the request form will have nothing to pick`);
+  }
+
+  const acting = user.context;
+  const isClient = user.org === 'client';
+
+  if (isClient && acting === 'admin') {
+    head('Admin screens');
+    await expect('GET /api/vendors', '/api/vendors', 200);
+    await expect('GET /api/users', '/api/users', 200);
+    await expect('GET /api/reference', '/api/reference', 200);
+    await expect('GET /api/fonts', '/api/fonts', 200);
+    await expect('GET /api/numbering', '/api/numbering', 200);
+    const y = new Date().getUTCFullYear();
+    await expect('GET /api/summary', `/api/summary?from=${y}-01-01&to=${y}-12-31`, 200);
+
+    head('The admin must NOT be able to issue or read a document');
+    // The whole point of the system: the payer cannot produce its own
+    // evidence. A 200 here would make every invoice worthless as audit
+    // defence, so this is the most important assertion in the file.
+    await expect('POST /api/requests/1/approve  is refused', '/api/requests/1/approve',
+      [403, 404], { method: 'POST' });
+    await expect('GET  /api/invoices/1/pdf      is refused', '/api/invoices/1/pdf', [403, 404]);
+  }
+
+  if (!isClient) {
+    head('Vendor screens');
+    await expect('GET /api/requests?status=pending', '/api/requests?status=pending', 200);
+    head('A vendor must NOT be able to manage the roster');
+    await expect('GET /api/users  is refused', '/api/users', 403);
+    await expect('GET /api/vendors is refused', '/api/vendors', 403);
+  }
+
+  head('Signing out');
+  await expect('POST /api/auth/logout', '/api/auth/logout', 200, { method: 'POST' });
+  cookie = '';
+  await expect('GET /api/bootstrap  after logout', '/api/bootstrap', 401);
+};
+
+run()
+  .catch((err) => bad(`smoke test threw: ${err.stack || err}`))
+  .finally(() => {
+    console.log(`\n${pass} passed, ${failures.length} failed`);
+    if (failures.length) {
+      console.log('\nFailures:');
+      for (const f of failures) console.log(`  - ${f}`);
+    }
+    process.exit(failures.length ? 1 : 0);
+  });

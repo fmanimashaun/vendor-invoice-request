@@ -1742,6 +1742,19 @@ check('a malformed Access token -> 401', r.status === 401 && body.error === 'bad
 r = await raw('/api/auth/sso', { 'Cf-Access-Jwt-Assertion': 'a.b' });
 check('a two-segment token is rejected', r.status === 401, String(r.status));
 
+// A session cookie is attacker-controlled input, and a stale one after a
+// secret rotation is corrupt rather than merely wrong. Every shape of rubbish
+// must come back 401. These all used to 500: the base64 decode of the
+// signature sat outside readSession's try, so atob threw on anything that was
+// not valid base64 and the throw escaped to the router. A returning user with
+// a bad cookie then saw a server error instead of the login screen.
+for (const junk of ['garbage', 'a.b', 'a.b.c', '.', '..', 'x'.repeat(400),
+                    'eyJhIjoxfQ.!!!', '%.%']) {
+  r = await raw('/api/bootstrap', { cookie: `session=${junk}` });
+  check(`a corrupt session cookie (${junk.slice(0, 12)}) -> 401, never 500`,
+    r.status === 401, `status=${r.status}`);
+}
+
 // Simulate the first successful sign-in, which is what completes the cutover.
 DB.db.prepare("UPDATE config SET sso_verified_at = datetime('now') WHERE id = 1").run();
 

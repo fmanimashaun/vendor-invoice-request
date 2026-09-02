@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
+    "smoke": "node scripts/smoke.mjs",
     "db:local": "wrangler d1 execute vendor-invoice-request --local --file=migrations/0001_init.sql",
     "db:remote": "wrangler d1 execute vendor-invoice-request --remote --file=migrations/0001_init.sql",
     "seed": "wrangler d1 execute vendor-invoice-request --local --file=scripts/seed.local.sql",

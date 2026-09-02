@@ -579,6 +579,36 @@ npx wrangler d1 execute <db> --remote --command="SELECT name FROM pragma_table_i
 If this ever needs to survive real data, add proper numbered migrations and
 `wrangler d1 migrations apply` before the first invoice is issued, not after.
 
+## Deploying, and testing what you deployed
+
+`npm test` runs the Worker handler in-process against a SQLite shim. It proves
+the logic. It cannot prove the deployment — a stale database, a missing KV
+binding, a bundle that never rebuilt all pass every assertion and still hand a
+user a white screen. So there is a second suite that goes over the wire:
+
+```bash
+npm run deploy                                   # NOT `npx wrangler deploy`
+npm run smoke -- https://app.example.com         # unauthenticated checks
+SMOKE_EMAIL=... SMOKE_PASSWORD=... npm run smoke -- https://app.example.com
+```
+
+`scripts/smoke.mjs` is **read-only on purpose**. It signs in and reads; it
+never creates a request or approves one. A smoke test that issues an invoice
+burns a number out of the live sequence, and that number is exactly what the
+downstream approvals system keys on. Keep any addition to GETs.
+
+Two traps it exists to catch, both of which have already happened here:
+
+- **`npx wrangler deploy` does not build.** It ships whatever is sitting in
+  `dist/`, with no warning that the source moved on. A fix was written, tested,
+  "deployed", and verified as still broken in production because of this. Use
+  `npm run deploy`, which is `vite build && wrangler deploy`.
+- **`routes` in `wrangler.toml` never reaches Cloudflare.** The Cloudflare Vite
+  plugin generates its own `dist/<name>/wrangler.json` and drops the key, so
+  the deploy reports only the workers.dev trigger and binds no custom domain.
+  Bind it in the dashboard instead. `grep routes dist/<name>/wrangler.json`
+  tells you which world you are in.
+
 ## Known gaps
 
 - No email delivery. The approving vendor shares the PDF manually — there is a
