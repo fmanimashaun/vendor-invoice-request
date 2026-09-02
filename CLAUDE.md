@@ -48,9 +48,9 @@ versions of this file argued the document was a wallet funding request rather
 than a tax invoice and that VAT/WHT/TIN were therefore out of scope. That was
 reasoning about one specific arrangement and it does not generalise: the client
 requests invoices from vendors, holds their TINs on file, and different vendors
-have different tax positions. `vendor_config` carries `tin`, `vat_rate_bps`,
-`wht_rate_bps` and `vat_basis`, all optional, and a vendor with none set
-produces exactly the document the system produced before tax existed.
+have different tax positions. `vendor_config` carries `tin`, `vat_rate_bps` and
+`vat_basis`, all optional, and a vendor with none set produces exactly the
+document the system produced before tax existed.
 
 Two things that are still true and still easy to "fix" by mistake:
 
@@ -217,10 +217,12 @@ points** (750 = 7.5%) for exactly this reason.
 - `invoices`: `total_kobo = amount_kobo + fee_kobo + vat_kobo`. Both are CHECK
   constraints.
 
-**VAT is added; WHT is not.** VAT increases what the payer transfers. WHT is
-withheld by the payer and remitted separately, so it never changes the invoice
-total — it prints as its own deduction line with a net-payable figure below it.
-Folding WHT into the total would understate the invoice.
+**VAT is added. There is no withholding tax.** VAT increases what the payer
+transfers. An earlier version also printed WHT as a deduction with a
+net-payable figure below the total; it was removed because no vendor on this
+platform is subject to it, and a tax line that is always zero is a line
+someone eventually reads as meaningful. Reinstating it means a schema change
+and a new line on the document, not a config toggle.
 
 The document prints bill amount, processing fee, VAT, total, and where
 applicable the WHT deduction and net, as separate lines — the old template said

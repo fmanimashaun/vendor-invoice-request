@@ -178,17 +178,6 @@ export async function renderInvoice(inv, assets, template, { specimen = false } 
   text('Total to transfer', COL_EXTRA, y, { font: bold });
   textRight(naira(inv.total_kobo), COL_AMOUNT, y, { font: bold });
 
-  // Withholding reduces what the vendor receives but NOT what is transferred
-  // against this invoice, so it sits below the total and is labelled as a
-  // deduction rather than folded into a single figure.
-  if (inv.wht_kobo) {
-    y += tpl.totals.rowH;
-    text('Less withholding tax', COL_EXTRA, y);
-    textRight(`-${naira(inv.wht_kobo)}`, COL_AMOUNT, y);
-    y += tpl.totals.rowH;
-    text('Net to vendor after WHT', COL_EXTRA, y);
-    textRight(naira(inv.total_kobo - inv.wht_kobo), COL_AMOUNT, y);
-  }
   y += tpl.totals.after;
 
   // ── Payment instructions ────────────────────────────────────────────

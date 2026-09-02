@@ -29,7 +29,6 @@ function totals(rows) {
     amount: sum('issued_amount_kobo'),
     fee: sum('issued_fee_kobo'),
     vat: sum('issued_vat_kobo'),
-    wht: sum('issued_wht_kobo'),
     pending: rows.filter((r) => r.status === 'pending'),
   };
 }
@@ -79,10 +78,6 @@ export default function Dashboard({ requests = [], loading = false, onSeeAll }) 
           <Stat label="Bill amount" value={naira(t.amount)} hint="Excluding fees and tax" />
           <Stat label="Processing fees" value={naira(t.fee)} />
           {t.vat > 0 && <Stat label="VAT" value={naira(t.vat)} hint="Added to totals" />}
-          {t.wht > 0 && (
-            <Stat label="WHT to remit" value={naira(t.wht)}
-                  hint="Withheld, not part of the total" />
-          )}
           {t.pending.length > 0 && (
             <Stat label="Awaiting a vendor" value={t.pending.length}
                   hint={`${naira(t.pending.reduce((n, r) => n + (r.total_kobo || 0), 0))} not yet issued`} />

@@ -215,7 +215,6 @@ CREATE TABLE IF NOT EXISTS vendor_config (
   -- POINTS (750 = 7.5%) so nothing here is ever a float.
   tin                 TEXT,
   vat_rate_bps        INTEGER NOT NULL DEFAULT 0,
-  wht_rate_bps        INTEGER NOT NULL DEFAULT 0,
   -- What the rates apply to. 'invoice' — the whole invoice is this vendor's
   -- own supply, the normal case. 'fee' — the vendor passes a third-party bill
   -- through at cost and only their fee is a taxable supply, which is how the
@@ -365,7 +364,6 @@ CREATE TABLE IF NOT EXISTS invoices (
   -- remitted separately, so it reduces what the vendor receives but not the
   -- invoice total — it prints as its own line and a net-payable figure.
   vat_kobo    INTEGER NOT NULL DEFAULT 0,
-  wht_kobo    INTEGER NOT NULL DEFAULT 0,
   tin         TEXT,
   total_kobo  INTEGER NOT NULL,
 

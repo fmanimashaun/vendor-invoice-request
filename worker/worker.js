@@ -617,15 +617,13 @@ function parseTax(b) {
     return Math.round(n * 100);            // 7.5 -> 750 bps
   };
   const vat = pct(b.vat_rate_pct);
-  const wht = pct(b.wht_rate_pct);
   if (vat === null) return { error: 'vat_rate_pct must be a percentage between 0 and 100.' };
-  if (wht === null) return { error: 'wht_rate_pct must be a percentage between 0 and 100.' };
 
   const basis = String(b.vat_basis || 'invoice');
   if (!['invoice', 'fee'].includes(basis)) {
     return { error: "vat_basis must be 'invoice' or 'fee'." };
   }
-  return { tin: String(b.tin || '').trim() || null, vat, wht, basis };
+  return { tin: String(b.tin || '').trim() || null, vat, basis };
 }
 
 /**
@@ -664,7 +662,6 @@ async function summary(env, me, url) {
             COALESCE(SUM(i.amount_kobo), 0) AS amount_kobo,
             COALESCE(SUM(i.fee_kobo), 0)    AS fee_kobo,
             COALESCE(SUM(i.vat_kobo), 0)    AS vat_kobo,
-            COALESCE(SUM(i.wht_kobo), 0)    AS wht_kobo,
             COALESCE(SUM(i.total_kobo), 0)  AS total_kobo
        FROM invoices i WHERE ${range[0]}`, from, to);
 
@@ -1252,7 +1249,7 @@ async function listVendors(env, me) {
   const { results } = await env.DB.prepare(
     `SELECT v.*, c.fee_kobo, c.bank_account_name, c.bank_account_number,
             c.bank_name, c.signatory_name, c.signatory_title,
-            c.tin, c.vat_rate_bps, c.wht_rate_bps, c.vat_basis,
+            c.tin, c.vat_rate_bps, c.vat_basis,
             (SELECT COUNT(*) FROM users u
               WHERE u.vendor_id = v.id AND u.status = 'active') AS staff_count,
             (SELECT COUNT(*) FROM invoices i WHERE i.vendor_id = v.id) AS invoice_count
@@ -1300,11 +1297,11 @@ async function createVendor(request, env, me) {
     await env.DB.prepare(
       `INSERT INTO vendor_config (vendor_id, bank_account_name, bank_account_number,
                                   bank_name, fee_kobo, signatory_name, signatory_title,
-                                  tin, vat_rate_bps, wht_rate_bps, vat_basis, updated_by)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)`,
+                                  tin, vat_rate_bps, vat_basis, updated_by)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`,
     ).bind(v.id, b.bank_account_name.trim(), b.bank_account_number.trim(), b.bank_name.trim(),
            fee, b.signatory_name.trim(), b.signatory_title.trim(),
-           tax.tin, tax.vat, tax.wht, tax.basis, me.email).run();
+           tax.tin, tax.vat, tax.basis, me.email).run();
 
     console.warn('VENDOR_ONBOARDED', me.email, code);
   await audit(env, me, 'VENDOR_ONBOARDED', {
@@ -1413,7 +1410,6 @@ async function previewVendorTemplate(request, env, me, id) {
     amount_kobo: 12345600,
     fee_kobo: vendor.fee_kobo ?? 10000,
     vat_kobo: 0,
-    wht_kobo: 0,
     total_kobo: 12345600 + (vendor.fee_kobo ?? 10000),
     bank_account_name: vendor.bank_account_name || 'Account Name',
     bank_account_number: vendor.bank_account_number || '0000000000',
@@ -1500,7 +1496,7 @@ const publicVendor = (v) => ({
   bank_account_name: v.bank_account_name, bank_account_number: v.bank_account_number,
   bank_name: v.bank_name, signatory_name: v.signatory_name,
   signatory_title: v.signatory_title, tin: v.tin,
-  vat_rate_bps: v.vat_rate_bps, wht_rate_bps: v.wht_rate_bps, vat_basis: v.vat_basis,
+  vat_rate_bps: v.vat_rate_bps, vat_basis: v.vat_basis,
   contact_lines: JSON.parse(v.contact_lines || '[]'),
   has_template: !!v.template_json,
   fee_kobo: v.fee_kobo,
@@ -1714,7 +1710,6 @@ async function listRequests(request, env, me, url) {
             d.full_name AS decided_by_name, i.invoice_no,
             i.approver_name, i.approver_title, i.amount_kobo AS issued_amount_kobo,
             i.vat_kobo AS issued_vat_kobo,
-            i.wht_kobo AS issued_wht_kobo,
             i.total_kobo AS issued_total_kobo,
             i.fee_kobo AS issued_fee_kobo, dv.name AS decided_vendor_name
        FROM requests r
@@ -1908,10 +1903,12 @@ async function createRequest(request, env, me) {
  * fee where the bill itself is a third-party pass-through.
  */
 function taxFor(cfg, amountKobo, feeKobo) {
+  // `vat_basis = 'fee'` is for a pass-through arrangement: the vendor funds a
+  // utility wallet at cost and charges a fee, so only the fee is their supply.
+  // A vendor billing for their own services uses the default, 'invoice'.
   const base = cfg.vat_basis === 'fee' ? feeKobo : amountKobo + feeKobo;
   const vatKobo = Math.round(base * (cfg.vat_rate_bps || 0) / 10000);
-  const whtKobo = Math.round(base * (cfg.wht_rate_bps || 0) / 10000);
-  return { vatKobo, whtKobo, totalKobo: amountKobo + feeKobo + vatKobo };
+  return { vatKobo, totalKobo: amountKobo + feeKobo + vatKobo };
 }
 
 /**
@@ -2129,7 +2126,7 @@ async function approveRequest(env, me, id) {
 
   // The fee belongs to the vendor, so the total is settled here, not at submit.
   const feeKobo = cfg.fee_kobo;
-  const { vatKobo, whtKobo, totalKobo } = taxFor(cfg, req.amount_kobo, feeKobo);
+  const { vatKobo, totalKobo } = taxFor(cfg, req.amount_kobo, feeKobo);
   const platform = await env.DB.prepare(
     'SELECT org_name, seq_floor, instance_epoch FROM config WHERE id = 1').first();
   const cfgFloor = Number(platform?.seq_floor) || 0;
@@ -2191,9 +2188,9 @@ async function approveRequest(env, me, id) {
               signatory_name, signatory_title, issued_by,
               approver_name, approver_title, approver_phone, approver_email,
               vendor_id, amount_kobo, fee_kobo, total_kobo,
-              vat_kobo, wht_kobo, tin, client_name,
+              vat_kobo, tin, client_name,
               template_json, renderer_version)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)`,
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)`,
         ).bind(
           invoice_no, req.id, req.bu_code, site, req.period, seq,
           cfg.bank_account_name, cfg.bank_account_number, cfg.bank_name,
@@ -2201,7 +2198,7 @@ async function approveRequest(env, me, id) {
           // Signature block. Copied, not joined -- invariant 3.
           me.full_name, me.job_title, me.phone, me.email,
           me.vendor_id, req.amount_kobo, feeKobo, totalKobo,
-          vatKobo, whtKobo, cfg.tin, platform?.org_name || null,
+          vatKobo, cfg.tin, platform?.org_name || null,
           // The layout, frozen. Same reason as the signature block above: the
           // route that regenerates this used to join the vendor's CURRENT
           // template, so editing a layout rewrote documents already issued.
@@ -2234,7 +2231,7 @@ async function approveRequest(env, me, id) {
         after: {
           invoice_no, seq, request_ref: req.request_ref,
           amount_kobo: req.amount_kobo, fee_kobo: feeKobo,
-          vat_kobo: vatKobo, wht_kobo: whtKobo, total_kobo: totalKobo,
+          vat_kobo: vatKobo, total_kobo: totalKobo,
           approver: me.full_name, vendor_id: me.vendor_id,
         },
       });
@@ -2331,7 +2328,6 @@ async function invoicePdf(env, me, invoiceNo) {
     vendor_name: row.vendor_name,
     client_name: row.client_name,
     vat_kobo: row.vat_kobo,
-    wht_kobo: row.wht_kobo,
     tin: row.tin,
     issued_at: row.issued_at.replace(' ', 'T') + 'Z',
   }, assets, tpl);
@@ -2439,13 +2435,13 @@ async function updateVendorConfig(request, env, me, vendorId) {
   await env.DB.prepare(
     `UPDATE vendor_config SET bank_account_name=?1, bank_account_number=?2, bank_name=?3,
             fee_kobo=?4, signatory_name=?5, signatory_title=?6,
-            tin=?7, vat_rate_bps=?8, wht_rate_bps=?9, vat_basis=?10,
-            updated_at=datetime('now'), updated_by=?11
-      WHERE vendor_id = ?12`,
+            tin=?7, vat_rate_bps=?8, vat_basis=?9,
+            updated_at=datetime('now'), updated_by=?10
+      WHERE vendor_id = ?11`,
   ).bind(
     b.bank_account_name.trim(), b.bank_account_number.trim(), b.bank_name.trim(),
     fee, b.signatory_name.trim(), b.signatory_title.trim(),
-    tax.tin, tax.vat, tax.wht, tax.basis, me.email, vendorId,
+    tax.tin, tax.vat, tax.basis, me.email, vendorId,
   ).run();
 
   // Already-issued invoices keep their own copy of these values, so this

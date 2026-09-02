@@ -726,14 +726,13 @@ r = await call('reladmin', '/api/vendors', { method: 'POST', body: {
   code: 'taxed', name: 'Taxed Vendor Ltd', bank_account_name: 'Taxed Vendor Ltd',
   bank_account_number: '5555555555', bank_name: 'Access', fee_kobo: 10000,
   signatory_name: 'Tax Person', signatory_title: 'MD',
-  tin: '12345678-0001', vat_rate_pct: 7.5, wht_rate_pct: 5,
+  tin: '12345678-0001', vat_rate_pct: 7.5,
 } });
 check('a vendor can be onboarded with tax details', r.status === 201, JSON.stringify(r.data));
 const taxedId = r.data?.vendor?.id;
 const taxedCfg = DB.db.prepare('SELECT * FROM vendor_config WHERE vendor_id = ?').get(taxedId);
 check('percentages are stored as basis points, never floats',
-  taxedCfg.vat_rate_bps === 750 && taxedCfg.wht_rate_bps === 500,
-  `${taxedCfg.vat_rate_bps}/${taxedCfg.wht_rate_bps}`);
+  taxedCfg.vat_rate_bps === 750, String(taxedCfg.vat_rate_bps));
 check('the TIN is stored', taxedCfg.tin === '12345678-0001', String(taxedCfg.tin));
 check('vat_basis defaults to the whole invoice', taxedCfg.vat_basis === 'invoice', taxedCfg.vat_basis);
 
@@ -766,7 +765,10 @@ const taxedInv = DB.db.prepare('SELECT * FROM invoices WHERE request_id = ?').ge
 check('VAT is computed on the whole invoice', taxedInv.vat_kobo === 75750, String(taxedInv.vat_kobo));
 check('VAT is ADDED to the total',
   taxedInv.total_kobo === 1000000 + 10000 + 75750, String(taxedInv.total_kobo));
-check('WHT is computed but NOT added to the total', taxedInv.wht_kobo === 50500, String(taxedInv.wht_kobo));
+// There is no withholding tax any more. Asserted rather than assumed, because
+// a column quietly left behind would keep appearing in reports as zero.
+check('the invoice row carries no wht column at all',
+  !('wht_kobo' in taxedInv), Object.keys(taxedInv).filter((k) => /wht/.test(k)).join(','));
 check('the TIN is copied onto the invoice at issue',
   taxedInv.tin === '12345678-0001', String(taxedInv.tin));
 
@@ -785,8 +787,7 @@ check('the taxed invoice still renders', r.status === 200 && r.data?.length > 20
 // A vendor with no tax configured produces the document it always did.
 const plainInv = DB.db.prepare('SELECT * FROM invoices WHERE vendor_id = 1 LIMIT 1').get();
 check('a vendor with no tax set has zero VAT and WHT',
-  plainInv.vat_kobo === 0 && plainInv.wht_kobo === 0,
-  `${plainInv.vat_kobo}/${plainInv.wht_kobo}`);
+  plainInv.vat_kobo === 0, String(plainInv.vat_kobo));
 check('and its total is still amount + fee',
   plainInv.total_kobo === plainInv.amount_kobo + plainInv.fee_kobo, String(plainInv.total_kobo));
 

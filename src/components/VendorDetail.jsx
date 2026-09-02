@@ -27,7 +27,6 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
     signatory_title: vendor.signatory_title ?? '',
     tin: vendor.tin ?? '',
     vat_rate_pct: vendor.vat_rate_bps ? String(vendor.vat_rate_bps / 100) : '',
-    wht_rate_pct: vendor.wht_rate_bps ? String(vendor.wht_rate_bps / 100) : '',
     vat_basis: vendor.vat_basis ?? 'invoice',
   });
   const [reps, setReps]   = useState([]);
@@ -196,10 +195,6 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
             <Field label="VAT %" hint="Added to the invoice total.">
               <input style={inputStyle} value={cfg.vat_rate_pct} onChange={setC('vat_rate_pct')}
                      inputMode="decimal" placeholder="7.5" />
-            </Field>
-            <Field label="WHT %" hint="Shown as a deduction, not added.">
-              <input style={inputStyle} value={cfg.wht_rate_pct} onChange={setC('wht_rate_pct')}
-                     inputMode="decimal" placeholder="5" />
             </Field>
             <Field label="Tax applies to" hint="Fee only, where the bill is a pass-through at cost.">
               <select style={inputStyle} value={cfg.vat_basis} onChange={setC('vat_basis')}>
