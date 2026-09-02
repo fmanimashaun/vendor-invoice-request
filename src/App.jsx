@@ -4,6 +4,7 @@ import { Card, Field, Banner, button } from './components/Shell.jsx';
 import RequestForm from './components/RequestForm.jsx';
 import Queue from './components/Queue.jsx';
 import History from './components/History.jsx';
+import Requests from './components/Requests.jsx';
 import Vendors from './components/Vendors.jsx';
 import Users from './components/Users.jsx';
 import Dashboard from './components/Dashboard.jsx';
@@ -221,8 +222,9 @@ export default function App() {
         {tab === 'queue' && (
           <Queue requests={requests} me={user} onChanged={refresh} />
         )}
-        {tab === 'history' && (
-          <History requests={requests} me={user} acting={acting} onChanged={refresh} />
+        {tab === 'history' && (isVendor
+          ? <History requests={requests} me={user} acting={acting} onChanged={refresh} />
+          : <Requests requests={requests} me={user} acting={acting} />
         )}
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'vendors' && <Vendors />}

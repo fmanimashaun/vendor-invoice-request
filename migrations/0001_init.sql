@@ -140,6 +140,31 @@ CREATE TABLE IF NOT EXISTS config (
   org_name          TEXT NOT NULL DEFAULT '',
   default_fee_kobo  INTEGER NOT NULL DEFAULT 10000,   -- minor units
 
+  -- Identifies THIS deployment, stamped on every invoice number it issues.
+  --
+  -- Set once, the first time an invoice is issued, from the wall clock. A
+  -- deployment rebuilt from nothing — different Cloudflare account, in-house
+  -- infrastructure, no data carried over — starts a fresh config row at a
+  -- different hour and therefore stamps a different value, so it cannot
+  -- reproduce a number the old system issued. Nothing needs to be remembered,
+  -- transferred, or looked up: the guarantee comes from the clock.
+  --
+  -- Never edit this by hand, and never copy it into a new deployment. Doing
+  -- either reintroduces exactly the collision it prevents.
+  instance_epoch    TEXT NOT NULL DEFAULT '',
+
+  -- The lowest sequence a NEW invoice may take, across every scope.
+  --
+  -- For when this system is rebuilt somewhere else — a different Cloudflare
+  -- account, in-house infrastructure — and neither D1 nor KV comes with it. A
+  -- fresh deployment would otherwise restart at 001 and re-issue numbers the
+  -- downstream approvals system already holds, which rejects them and blocks
+  -- payment.
+  --
+  -- Set it once during that migration to something above every number ever
+  -- issued. 0 means no floor, which is correct for a first deployment.
+  seq_floor         INTEGER NOT NULL DEFAULT 0,
+
   -- Single sign-on for CLIENT staff, set up in the app rather than at deploy
   -- time so a deployment can start with passwords and move to SSO later.
   -- Vendors always use email and password; they are not in the client's
@@ -295,9 +320,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_dup_staffdc
 -- Created only on approval, by a vendor user. No row here means no PDF: that
 -- is what stops the client producing a document on someone else's letterhead.
 --
--- The invoice NUMBER is deliberately global rather than per-vendor: it is built
--- from the client's own reference (BU / site / period / sequence), so a request
--- carries the same number whichever vendor happens to serve it.
+-- The invoice NUMBER is 'EEEE-NNNNN' — a deployment stamp and one global
+-- sequence, ten characters, because the downstream approvals system limits the
+-- length. It does not encode vendor, unit, site or period: all of those are
+-- columns here and printed on the document. See shared/reference.js.
 CREATE TABLE IF NOT EXISTS invoices (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   invoice_no  TEXT NOT NULL UNIQUE,            -- RFC/GBG/2026/SEP/001
@@ -342,6 +368,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   issued_at   TEXT NOT NULL DEFAULT (datetime('now')),
   issued_by   INTEGER NOT NULL REFERENCES users(id),
 
-  UNIQUE (bu_code, site_code, period, seq),
+  -- One global sequence: the number no longer encodes scope, so uniqueness is
+  -- on seq alone. This also makes gap detection a single check.
+  UNIQUE (seq),
   CHECK (total_kobo = amount_kobo + fee_kobo + vat_kobo)
 );

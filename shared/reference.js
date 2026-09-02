@@ -68,14 +68,44 @@ export function numberingSiteIn(ref, bu_code, site_code) {
   return ref?.businessUnits?.find((b) => b.code === bu_code)?.numbering_site ?? null;
 }
 
-/** 'RFC','GBG','2026-09',1 -> 'RFC/GBG/2026/SEP/001'. Derived, never stored. */
-export function invoiceRef({ bu_code, site_code, period, seq }) {
-  const [y, m] = period.split('-');
-  return `${bu_code}/${site_code}/${y}/${MONTHS[+m - 1]}/${String(seq).padStart(3, '0')}`;
+/**
+ * Hours since 2020-01-01 in base 36 — a short, monotonic stamp for one
+ * deployment.
+ *
+ * Two systems set up more than an hour apart can never produce the same value,
+ * which is what lets a rebuilt deployment guarantee it will not reissue an old
+ * number WITHOUT consulting the old one. Four characters until well past 2100.
+ */
+const EPOCH_2020_HOURS = Date.UTC(2020, 0, 1) / 3600000;
+export const instanceEpoch = (at = Date.now()) =>
+  Math.floor(at / 3600000 - EPOCH_2020_HOURS).toString(36).toUpperCase();
+
+/**
+ * 'EEEE-NNNNN' — ten characters, e.g. `1941-00042`.
+ *
+ * Kept short because the downstream approvals system limits how long an
+ * invoice number may be. That constraint is why the number no longer spells
+ * out business unit, site and period: ten characters cannot hold all of that
+ * and still be unique, and it does not need to. Those live on the document and
+ * in the `invoices` row, which is where anyone actually reads them.
+ *
+ *   EEEE   the deployment stamp (see instanceEpoch). Two systems set up more
+ *          than an hour apart can never produce the same number, so a rebuild
+ *          on other infrastructure cannot reissue an old one.
+ *   NNNNN  a single global sequence, not one per site. Gap detection is
+ *          therefore better than before: one run of numbers to check rather
+ *          than thirty, and 003 missing is still 003 missing.
+ *
+ * 99,999 invoices per deployment — over three centuries at this volume — and
+ * the epoch stays four characters until 2211.
+ */
+export function invoiceRef({ seq, epoch }) {
+  const n = String(seq).padStart(5, '0');
+  return epoch ? `${epoch}-${n}` : n;
 }
 
-/** Slashes are path separators — downloads need a flat name. */
-export const downloadName = (ref) => `${ref.replace(/\//g, '-')}.pdf`;
+/** The ref is already filename-safe; the replace guards older stored refs. */
+export const downloadName = (ref) => `${String(ref).replace(/\//g, '-')}.pdf`;
 
 /** kobo -> '₦75,000.00'. Integers only; never floats for money. */
 export function naira(kobo) {

@@ -45,6 +45,7 @@ export const api = {
   saveConfig:  (cfg)            => call('/config', { method: 'PUT', body: cfg }),
   reference:   ()               => call('/reference'),
   fonts:       ()               => call('/fonts'),
+  numbering:   ()               => call('/numbering'),
   ssoConfig:   ()               => call('/sso-config'),
   saveSsoConfig: (c)            => call('/sso-config', { method: 'PUT', body: c }),
   deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),

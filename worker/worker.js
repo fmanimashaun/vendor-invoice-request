@@ -22,7 +22,7 @@ import { checkPassword, PASSWORD_HINT } from '../shared/password.js';
 import fontkit from '@pdf-lib/fontkit';
 import {
   REQUEST_TYPES,
-  typeFor, numberingSiteIn, invoiceRef, downloadName, siteNameIn, buNameIn, periodLabel,
+  typeFor, numberingSiteIn, invoiceRef, instanceEpoch, downloadName, siteNameIn, buNameIn, periodLabel,
   naira,
 } from '../shared/reference.js';
 
@@ -189,6 +189,7 @@ async function route(request, env, url) {
     return upsertBu(request, env, me, m[1]);
   if (path === '/api/bu-sites' && method === 'POST')  return linkBuSite(request, env, me);
   if (path === '/api/platform-config' && method === 'PUT') return updatePlatformConfig(request, env, me);
+  if (path === '/api/numbering' && method === 'GET')   return getNumbering(env, me);
   if (path === '/api/sso-config' && method === 'GET')  return getSsoConfig(env, me);
   if (path === '/api/sso-config' && method === 'PUT')  return putSsoConfig(request, env, me);
 
@@ -817,12 +818,29 @@ async function updatePlatformConfig(request, env, me) {
   if (orgName !== null && !orgName) {
     return fail('bad_request', 'org_name cannot be blank.');
   }
+
+  // A floor may only ever rise. Lowering it would let the system re-issue a
+  // number it has already used, which is the exact thing it exists to prevent.
+  let floor = null;
+  if (b.seq_floor !== undefined) {
+    const n = Number(b.seq_floor);
+    if (!Number.isInteger(n) || n < 0) {
+      return fail('bad_request', 'seq_floor must be a whole number, zero or more.');
+    }
+    const cur = await env.DB.prepare('SELECT seq_floor FROM config WHERE id = 1').first();
+    if (n < (cur?.seq_floor ?? 0)) {
+      return fail('bad_request',
+        `The floor can only be raised. It is already ${cur.seq_floor}.`);
+    }
+    floor = n;
+  }
   await env.DB.prepare(
     `UPDATE config SET default_fee_kobo = ?1,
             org_name = COALESCE(?3, org_name),
+            seq_floor = COALESCE(?4, seq_floor),
             updated_at = datetime('now'), updated_by = ?2
       WHERE id = 1`,
-  ).bind(fee, me.email, orgName).run();
+  ).bind(fee, me.email, orgName, floor).run();
   const row = await env.DB.prepare('SELECT * FROM config WHERE id = 1').first();
   return json({ config: row });
 }
@@ -839,6 +857,23 @@ async function updatePlatformConfig(request, env, me) {
  * on passwords and adopt SSO later without a redeploy, and the person who sets
  * it up is an admin rather than whoever holds the deploy credentials.
  */
+/**
+ * What a migration needs to know: the current floor and the highest number
+ * ever issued here. Rebuilding elsewhere means setting the new deployment's
+ * floor above this.
+ */
+async function getNumbering(env, me) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+  const cfg = await env.DB.prepare('SELECT seq_floor FROM config WHERE id = 1').first();
+  const { high } = await env.DB.prepare(
+    'SELECT COALESCE(MAX(seq), 0) AS high FROM invoices').first();
+  const { latest } = await env.DB.prepare(
+    'SELECT invoice_no AS latest FROM invoices ORDER BY id DESC LIMIT 1').first()
+    || { latest: null };
+  return json({ seqFloor: cfg?.seq_floor ?? 0, highestSeq: high, latestInvoiceNo: latest });
+}
+
 async function getSsoConfig(env, me) {
   const denied = requireRosterAdmin(me);
   if (denied) return denied;
@@ -1489,12 +1524,21 @@ async function listRequests(request, env, me, url) {
   const clauses = [];
   const binds = [];
 
-  // the client sees every client request. A vendor sees the shared pending
-  // queue plus whatever it decided itself -- never another vendor's decided
-  // work. This is what makes the queue a marketplace rather than a mailbox.
+  // A member sees their OWN requests and nothing else — what a colleague spends
+  // is not their business. An admin sees every request, because reconciling the
+  // whole picture is the job. Acting context decides which, not roles held: an
+  // admin working as a member sees a member's view.
+  //
+  // A vendor sees the shared pending queue plus whatever it decided itself,
+  // never another vendor's decided work. That is what makes the queue a
+  // marketplace rather than a mailbox.
   if (me.org === 'client') {
     clauses.push('u.org = ?');
     binds.push('client');
+    if (me.ctx !== 'admin') {
+      clauses.push('r.created_by = ?');
+      binds.push(me.id);
+    }
   } else {
     clauses.push("(r.status = 'pending' OR r.decided_vendor_id = ?)");
     binds.push(me.vendor_id);
@@ -1848,7 +1892,7 @@ async function rejectRequest(request, env, me, id) {
  * duplicate. If KV is unavailable the mark reads as 0 and issuing carries on
  * from D1 — degraded, not blocked.
  */
-const seqWatermarkKey = (bu, site, period) => `seq/${bu}/${site}/${period}`;
+const SEQ_WATERMARK_KEY = 'seq/global';
 
 async function seqWatermark(env, key) {
   try {
@@ -1898,19 +1942,35 @@ async function approveRequest(env, me, id) {
   // The fee belongs to the vendor, so the total is settled here, not at submit.
   const feeKobo = cfg.fee_kobo;
   const { vatKobo, whtKobo, totalKobo } = taxFor(cfg, req.amount_kobo, feeKobo);
-  const platform = await env.DB.prepare('SELECT org_name FROM config WHERE id = 1').first();
+  const platform = await env.DB.prepare(
+    'SELECT org_name, seq_floor, instance_epoch FROM config WHERE id = 1').first();
+  const cfgFloor = Number(platform?.seq_floor) || 0;
+
+  // Claim this deployment's stamp the first time it issues anything. Written
+  // once and never again: every number this system produces carries it, so
+  // changing it later would orphan everything already issued.
+  let epoch = platform?.instance_epoch || '';
+  if (!epoch) {
+    epoch = instanceEpoch();
+    await env.DB.prepare(
+      "UPDATE config SET instance_epoch = ?1 WHERE id = 1 AND instance_epoch = ''",
+    ).bind(epoch).run();
+    // Another approval may have won the race; whoever wrote first owns it.
+    epoch = (await env.DB.prepare('SELECT instance_epoch FROM config WHERE id = 1').first())
+      ?.instance_epoch || epoch;
+    console.warn('INSTANCE_EPOCH_CLAIMED', epoch);
+  }
 
   const site = numberingSiteIn(await loadReference(env), req.bu_code, req.site_code);
 
   // Optimistic reservation. If two approvers race, the UNIQUE indexes on
   // invoice_no and (bu, site, period, seq) reject the loser and we retry with
   // a fresh sequence. We never guess a number after a failure.
-  const mark = seqWatermarkKey(req.bu_code, site, req.period);
+  const mark = SEQ_WATERMARK_KEY;
   for (let attempt = 0; attempt < 4; attempt++) {
     const { seq: maxSeq } = (await env.DB.prepare(
-      `SELECT COALESCE(MAX(seq), 0) AS seq FROM invoices
-        WHERE bu_code = ?1 AND site_code = ?2 AND period = ?3`,
-    ).bind(req.bu_code, site, req.period).first()) || { seq: 0 };
+      'SELECT COALESCE(MAX(seq), 0) AS seq FROM invoices',
+    ).first()) || { seq: 0 };
 
     // The counter must never go backwards, even if `invoices` is emptied.
     //
@@ -1921,8 +1981,13 @@ async function approveRequest(env, me, id) {
     // The high-water mark therefore lives in KV, a different store from D1: a
     // dropped or restored database does not take it with it. D1 remains the
     // source of truth when it is intact, so this only ever raises the floor.
-    const seq = Math.max(maxSeq, await seqWatermark(env, mark)) + 1;
-    const invoice_no = invoiceRef({ bu_code: req.bu_code, site_code: site, period: req.period, seq });
+    // Three floors, because each covers a failure the others cannot:
+    //   maxSeq    D1, authoritative while the database is intact
+    //   watermark KV, survives D1 being dropped or restored
+    //   seq_floor configuration, survives the whole deployment being rebuilt
+    //             on other infrastructure where neither store comes along
+    const seq = Math.max(maxSeq, await seqWatermark(env, mark), cfgFloor) + 1;
+    const invoice_no = invoiceRef({ seq, epoch });
 
     try {
       const [, updated] = await env.DB.batch([

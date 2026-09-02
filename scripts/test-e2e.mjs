@@ -379,35 +379,44 @@ check('The client cannot approve', r.status === 403, `got ${r.status}`);
 
 r = await call('victor', `/api/requests/${routerReqId}/approve`, { method: 'POST' });
 check('vendor approval issues an invoice', r.status === 201, JSON.stringify(r.data));
-check('invoice number format', r.data?.invoice_no === 'RFC/GBG/2026/SEP/001', r.data?.invoice_no);
-check('download name flattens slashes', r.data?.download === 'RFC-GBG-2026-SEP-001.pdf', r.data?.download);
+const EPOCH = DB.db.prepare('SELECT instance_epoch e FROM config WHERE id = 1').get().e;
+const refFor = (seq) => `${EPOCH}-${String(seq).padStart(5, '0')}`;
+check('invoice number format', r.data?.invoice_no === refFor(1), r.data?.invoice_no);
+// Ten characters, because the downstream approvals system limits the length.
+check('the number is ten characters', r.data?.invoice_no?.length === 10,
+  `${r.data?.invoice_no} is ${r.data?.invoice_no?.length}`);
+check('download name flattens slashes', r.data?.download === `${EPOCH}-00001.pdf`, r.data?.download);
 const routerInvoice = r.data?.invoice_no;
 
 r = await call('victor', `/api/requests/${routerReqId}/approve`, { method: 'POST' });
 check('double approval blocked', r.status === 409, `got ${r.status}`);
 
 r = await call('victor', `/api/requests/${staffReqId}/approve`, { method: 'POST' });
-check('BU-scope numbers against the BU numbering site', r.data?.invoice_no === 'RFC/LEK/2026/SEP/001', r.data?.invoice_no);
+check('a BU-scope request is numbered from the same global sequence',
+  /^[0-9A-Z]+-\d{5}$/.test(r.data?.invoice_no || ''), r.data?.invoice_no);
 
 // Independent counters per (BU, site, period).
 const surElec = DB.db.prepare(
   `SELECT id FROM requests WHERE type_code='ELEC' AND site_code='SUR' AND status='pending'`,
 ).get();
 r = await call('victor', `/api/requests/${surElec.id}/approve`, { method: 'POST' });
-check('Surulere gets its own sequence 001', r.data?.invoice_no === 'RFC/SUR/2026/SEP/001', r.data?.invoice_no);
+check('a different site does NOT restart the count',
+  r.data?.invoice_no !== refFor(1), r.data?.invoice_no);
 
 const rexStaff = DB.db.prepare(
   `SELECT id FROM requests WHERE bu_code='REX' AND status='pending'`,
 ).get();
 r = await call('victor', `/api/requests/${rexStaff.id}/approve`, { method: 'POST' });
-check('Retail numbers under REX/LEK', r.data?.invoice_no === 'REX/LEK/2026/SEP/001', r.data?.invoice_no);
+check('a different business unit shares the sequence too',
+  /^[0-9A-Z]+-\d{5}$/.test(r.data?.invoice_no || ''), r.data?.invoice_no);
 
 // A second Gbagada router in the same month should take seq 002.
 const gbg2 = DB.db.prepare(
   `SELECT id FROM requests WHERE asset_key='08099999999' AND status='pending'`,
 ).get();
 r = await call('victor', `/api/requests/${gbg2.id}/approve`, { method: 'POST' });
-check('sequence increments within a scope', r.data?.invoice_no === 'RFC/GBG/2026/SEP/002', r.data?.invoice_no);
+check('the sequence increments', Number(r.data?.invoice_no?.split('-')[1]) > 1,
+  r.data?.invoice_no);
 
 results.push('\nRejection frees the period');
 
@@ -543,7 +552,8 @@ r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf
 check('PDF renders', r.status === 200 && r.data?.length > 20000, `status=${r.status} bytes=${r.data?.length}`);
 check('PDF magic bytes', new TextDecoder().decode(r.data.slice(0, 5)) === '%PDF-');
 check('Content-Disposition uses the flat filename',
-  /RFC-GBG-2026-SEP-001\.pdf/.test(r.headers.get('Content-Disposition') || ''),
+  (r.headers.get('Content-Disposition') || '').includes(`${EPOCH}-`)
+    && (r.headers.get('Content-Disposition') || '').endsWith('.pdf"'),
   r.headers.get('Content-Disposition'));
 writeFileSync(join(ROOT, 'test-output.pdf'), r.data);
 
@@ -615,8 +625,9 @@ check('the total is recomputed from that fee',
   `${takenInvoice.total_kobo} vs ${takenInvoice.amount_kobo}+25000`);
 check("the approving vendor's bank account is on the invoice",
   takenInvoice.bank_account_number === '1234567890', takenInvoice.bank_account_number);
-check('the invoice number still comes from the client reference',
-  /^(RFC|REX|RHMO)\//.test(takenInvoice.invoice_no), takenInvoice.invoice_no);
+check('the number carries this deployment stamp and nothing vendor-specific',
+  takenInvoice.invoice_no.startsWith(`${EPOCH}-`) && takenInvoice.invoice_no.length === 10,
+  takenInvoice.invoice_no);
 
 r = await call('victor', `/api/requests/${openReq.id}/approve`, { method: 'POST' });
 check('a second vendor cannot approve what is already taken', r.status === 409, JSON.stringify(r.data));
@@ -1147,6 +1158,62 @@ r = await call('anon', '/api/auth/login', { method: 'POST', body: {
   email: 'phrase@client.example', password: 'a brand new passphrase here' } });
 check('the new password signs in', r.status === 200, JSON.stringify(r.data));
 
+results.push('\nA rebuilt deployment cannot reissue an old number');
+
+// The strongest version of the requirement: everything is lost, a fresh
+// deployment goes up on other infrastructure, and it must not reproduce a
+// number the old one issued — WITHOUT consulting the old one. Only the clock
+// can give that, which is what the instance epoch is.
+{
+  const { instanceEpoch: mkEpoch, invoiceRef: mkRef } =
+    await import('../shared/reference.js');
+
+  const t = Date.UTC(2026, 8, 2, 2, 17, 45);
+  // 02:17 + 40 minutes is still the 02:00 hour; + 59 would not be.
+check('an epoch is stable within the hour it was claimed',
+    mkEpoch(t) === mkEpoch(t + 40 * 60e3), `${mkEpoch(t)} vs ${mkEpoch(t + 40 * 60e3)}`);
+  check('and differs an hour later', mkEpoch(t) !== mkEpoch(t + 3600e3),
+    `${mkEpoch(t)} vs ${mkEpoch(t + 3600e3)}`);
+  check('it only ever moves forward',
+    mkEpoch(t + 3600e3) > mkEpoch(t) || mkEpoch(t + 3600e3).length > mkEpoch(t).length,
+    `${mkEpoch(t)} -> ${mkEpoch(t + 3600e3)}`);
+
+  // The same billing scope and the same sequence, issued by two deployments
+  // set up at different times, produce different numbers. That is the whole
+  // guarantee.
+  const oldRef = mkRef({ seq: 1, epoch: mkEpoch(t) });
+  const newRef = mkRef({ seq: 1, epoch: mkEpoch(t + 30 * 24 * 3600e3) });
+  check('two deployments cannot produce the same number for the same sequence',
+    oldRef !== newRef, `${oldRef} vs ${newRef}`);
+  check('the sequence survives inside it, so gaps are still visible',
+    oldRef.endsWith('-00001'), oldRef);
+  check('and it stays within the length limit', newRef.length === 10, newRef);
+
+  // The real database: every issued number carries this deployment's stamp.
+  const epochRow = DB.db.prepare('SELECT instance_epoch FROM config WHERE id = 1').get();
+  check('the deployment claimed an epoch when it first issued',
+    !!epochRow.instance_epoch, JSON.stringify(epochRow));
+  const nums = DB.db.prepare('SELECT invoice_no FROM invoices').all().map((x) => x.invoice_no);
+  check('and every invoice number carries it',
+    nums.length > 0 && nums.every((n) => n.startsWith(`${epochRow.instance_epoch}-`)),
+    nums.slice(0, 2).join(' '));
+
+  // Claimed once, never re-stamped.
+  const before = epochRow.instance_epoch;
+  const anotherReq = DB.db.prepare(
+    `INSERT INTO requests (request_ref, bu_code, site_code, type_code, period, asset_key,
+       addressee, addressee_loc, subject, narrative, description,
+       fee_kobo, amount_kobo, total_kobo, created_by)
+     VALUES ('REQ-EPOCH2', 'REX', 'LEK', 'ELEC', '2026-06', '04577777777', 'A', 'Lagos.',
+             'S', 'N', 'D', 10000, 500000, 510000, 4) RETURNING id`).get();
+  r = await call('victor', `/api/requests/${anotherReq.id}/approve`, { method: 'POST' });
+  check('a later invoice reuses the same epoch, not a new one',
+    r.status === 201 && r.data.invoice_no.startsWith(`${before}-`),
+    `${r.data?.invoice_no} should carry ${before}`);
+  check('and the epoch was not rewritten',
+    DB.db.prepare('SELECT instance_epoch FROM config WHERE id = 1').get().instance_epoch === before);
+}
+
 results.push('\nInvoice numbers survive a database rebuild');
 
 // The scenario: the database is rebuilt mid-month. Without a floor the counter
@@ -1154,13 +1221,11 @@ results.push('\nInvoice numbers survive a database rebuild');
 // holds, which rejects it and blocks a legitimate payment.
 const scope = DB.db.prepare(
   'SELECT bu_code, site_code, period FROM invoices ORDER BY id LIMIT 1').get();
-const mark = `seq/${scope.bu_code}/${scope.site_code}/${scope.period}`;
-const issuedSeqs = DB.db.prepare(
-  'SELECT seq FROM invoices WHERE bu_code=? AND site_code=? AND period=? ORDER BY seq',
-).all(scope.bu_code, scope.site_code, scope.period).map((r) => r.seq);
+const mark = 'seq/global';
+const issuedSeqs = DB.db.prepare('SELECT seq FROM invoices ORDER BY seq').all().map((r) => r.seq);
 const highest = Math.max(...issuedSeqs);
 
-check('the mark tracks the highest number issued in a scope',
+check('the mark tracks the highest number issued',
   Number(await kv.get(mark)) === highest, `${await kv.get(mark)} vs ${highest}`);
 
 // Wipe the invoices table, exactly as a rebuild would. KV is a separate store
@@ -1564,13 +1629,36 @@ check('the approving vendor\'s fee is what actually gets billed',
   rhmoInvoice.fee_kobo === 15000, String(rhmoInvoice.fee_kobo));
 check('and the invoice total is recomputed from it',
   rhmoInvoice.total_kobo === 5015000, String(rhmoInvoice.total_kobo));
-check('RHMO numbers under HQ', r.data?.invoice_no === 'RHMO/HQ/2026/SEP/001', r.data?.invoice_no);
+check('every unit draws from the one sequence',
+  /^[0-9A-Z]+-\d{5}$/.test(r.data?.invoice_no || ''), r.data?.invoice_no);
 
 results.push('\nVisibility');
 
 r = await call('rel', '/api/requests');
 const relRows = r.data.requests;
-check('the client sees its own requests', relRows.length > 0);
+check('a member sees requests', relRows.length > 0);
+
+// What a colleague spends is not a member's business.
+const relRow = DB.db.prepare("SELECT id FROM users WHERE email='requester@client.example'").get();
+check('a member sees only their own requests',
+  relRows.every((x) => x.created_by === relRow.id),
+  JSON.stringify(relRows.map((x) => x.created_by).filter((c) => c !== relRow.id)));
+
+r = await call('reladmin', '/api/requests');
+check('an admin sees every request', r.data.requests.length >= relRows.length,
+  `${r.data.requests.length} vs ${relRows.length}`);
+check('including ones raised by other people',
+  r.data.requests.some((x) => x.created_by !== relRow.id));
+
+// Context decides the view, not the roles held: the same account acting as a
+// member sees a member's slice.
+await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'member' } });
+r = await call('reladmin', '/api/requests');
+const adminId = DB.db.prepare("SELECT id FROM users WHERE email='roster.admin@client.example'").get().id;
+check('an admin acting as a member sees only their own',
+  r.data.requests.every((x) => x.created_by === adminId),
+  JSON.stringify(r.data.requests.map((x) => x.created_by)));
+await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'admin' } });
 r = await call('victor', '/api/requests');
 const vendorRows = r.data.requests;
 check('a vendor sees rows', vendorRows.length > 0);

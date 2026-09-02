@@ -27,6 +27,8 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
   const [org, setOrg]       = useState(orgName ?? '');
   const [fonts, setFonts]   = useState([]);
   const [ssoCfg, setSsoCfg] = useState(null);
+  const [numbering, setNumbering] = useState(null);
+  const [floor, setFloor] = useState('');
   const [sso, setSso]       = useState({ team_domain: '', aud: '', allowed_domains: '', enabled: false });
   const [font, setFont]     = useState({ key: '', name: '', kind: 'sans', metric_of: '' });
   const [fontFiles, setFontFiles] = useState({ regular: null, bold: null });
@@ -39,6 +41,9 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
     try {
       setRef(await api.reference());
       setFonts((await api.fonts()).fonts || []);
+      const num = await api.numbering();
+      setNumbering(num);
+      setFloor(String(num.seqFloor ?? 0));
       const cfg = await api.ssoConfig();
       setSsoCfg(cfg);
       setSso({
@@ -89,7 +94,9 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
       const { config } = await api.savePlatformConfig({
         default_fee_kobo: kobo,
         org_name: org.trim() || undefined,
+        seq_floor: floor === '' ? undefined : Number(floor),
       });
+      setNumbering(await api.numbering());
       onSaved?.(config);
       return 'Saved.';
     });
@@ -451,6 +458,39 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
         <Field label="Organisation name">
           <input style={{ ...inputStyle, maxWidth: 360 }} value={org}
                  onChange={(e) => setOrg(e.target.value)} placeholder="Example Group" />
+        </Field>
+      </Card>
+
+      <Card title="Invoice numbering">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 12px', lineHeight: 1.5 }}>
+          Invoice numbers must never repeat. Your approvals system already holds
+          the ones issued so far and will reject a duplicate, which blocks a
+          legitimate payment.
+        </p>
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          This matters when the system is <strong style={{ color: T.text }}>rebuilt
+          somewhere else</strong> — another Cloudflare account, in-house
+          infrastructure — and the data does not come with it. A fresh
+          deployment starts at 1 and would reissue numbers you have already
+          used. Set the floor above every number ever issued and it cannot.
+        </p>
+        {numbering && (
+          <div style={{
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: '9px 12px',
+            marginBottom: 14, fontSize: 13, color: T.textDim, lineHeight: 1.6,
+          }}>
+            <div>Highest sequence issued here: <strong style={{ color: T.text }}>
+              {numbering.highestSeq}</strong></div>
+            <div>Most recent invoice: <strong style={{ color: T.text }}>
+              {numbering.latestInvoiceNo || 'none yet'}</strong></div>
+            <div>Current floor: <strong style={{ color: T.text }}>
+              {numbering.seqFloor || 'none'}</strong></div>
+          </div>
+        )}
+        <Field label="Start sequences above"
+               hint="Can only be raised. Leave at 0 on a first deployment.">
+          <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0"
+                 value={floor} onChange={(e) => setFloor(e.target.value)} />
         </Field>
       </Card>
 

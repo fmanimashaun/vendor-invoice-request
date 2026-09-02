@@ -558,6 +558,27 @@ concurrency behaviour under a genuine race.
 - `console.warn('BANK_DETAILS_CHANGED', …)` on any bank change so it lands in
   `wrangler tail`. Wire it to a real notification before go-live.
 
+## Migrations — a trap that has already bitten
+
+There is one schema file, `migrations/0001_init.sql`, and it is written with
+`CREATE TABLE IF NOT EXISTS`. Re-running it against a database that already has
+the tables **does nothing**: it never alters an existing table, so a column,
+constraint or index added to the file after a deployment went live will not
+reach that deployment. `npm run db:remote` on a live database is a no-op, not an
+upgrade.
+
+There is no migration tracking table. So after changing the schema file, either
+recreate the database (fine while it holds no issued invoices) or write the
+matching `ALTER`/rebuild by hand and run it once. Diff the live schema against
+the file before assuming they match:
+
+```bash
+npx wrangler d1 execute <db> --remote --command="SELECT name FROM pragma_table_info('config')"
+```
+
+If this ever needs to survive real data, add proper numbered migrations and
+`wrangler d1 migrations apply` before the first invoice is issued, not after.
+
 ## Known gaps
 
 - No email delivery. The approving vendor shares the PDF manually — there is a

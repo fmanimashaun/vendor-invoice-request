@@ -100,7 +100,9 @@ export async function renderInvoice(inv, assets, template, { specimen = false } 
   }
 
   // ── Addressee / ref ─────────────────────────────────────────────────
-  const ref = invoiceRef(inv);
+  // The stored number, not a recomputed one: it carries the deployment stamp
+  // and is what the approvals system already holds.
+  const ref = inv.invoice_no || invoiceRef(inv);
   let y = tpl.head.top;
 
   text('To: ', MARGIN_L, y, { font: bold });
