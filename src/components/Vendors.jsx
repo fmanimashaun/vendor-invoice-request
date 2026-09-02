@@ -117,8 +117,12 @@ export default function Vendors() {
         </p>
 
         <Table head={['Vendor', 'Code', 'Fee', 'Reps', 'Invoices', 'Layout', 'Status', '']}
-               empty={vendors && vendors.length === 0
-                 ? 'No vendors yet. Onboard one to get started.' : null}>
+               loading={vendors === null}
+               empty={{
+                 title: 'No vendors yet',
+                 hint: 'Onboard one to get started. Every vendor sees the same pending '
+                   + 'queue; whichever approves first issues on its own letterhead.',
+               }}>
           {(vendors || []).map((v) => {
             const off = v.status !== 'active';
             return (
@@ -149,9 +153,7 @@ export default function Vendors() {
             );
           })}
         </Table>
-        {vendors === null && (
-          <p style={{ color: T.textDim, fontSize: 14, padding: '14px 10px', margin: 0 }}>Loading…</p>
-        )}
+
       </Card>
 
       {showNew && (

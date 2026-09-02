@@ -32,7 +32,10 @@ export default function History({ requests, me, acting, onChanged }) {
       <Banner onClose={() => setError(null)}>{error}</Banner>
       <Table
         head={['Request', 'Invoice', 'For', 'Type', 'Period', { label: 'Total', right: true }, 'Status', '']}
-        empty={rows.length === 0 ? 'Nothing here yet.' : null}
+        empty={{
+          title: 'Nothing here yet',
+          hint: 'Requests you approve or reject appear here, with a link to the invoice.',
+        }}
       >
         {rows.map((r) => (
           <tr key={r.id}>

@@ -65,7 +65,43 @@ export function Banner({ kind = 'error', children, onClose }) {
   );
 }
 
-export function Table({ head, children, empty }) {
+/**
+ * What to show where rows would be.
+ *
+ * "Nothing here" and "we do not know yet" are different statements, and
+ * showing the first while the second is true is a lie the user acts on — the
+ * dashboard breakdowns announced "Nothing issued in this range" before the
+ * request for that range had come back. Every table distinguishes them.
+ *
+ * `empty` takes a string, or { title, hint, action } when there is something
+ * useful to say or do about the emptiness.
+ */
+export function EmptyState({ title, hint, action, loading }) {
+  return (
+    <div style={{
+      padding: '30px 18px', textAlign: 'center',
+      border: `1px dashed ${T.border}`, borderRadius: T.radius,
+      margin: '10px 0 2px', background: T.panelAlt,
+    }}>
+      <div style={{
+        font: `${loading ? 400 : 600} 14px ${FONT}`,
+        color: loading ? T.textDim : T.text,
+      }}>
+        {loading ? 'Loading…' : title}
+      </div>
+      {!loading && hint && (
+        <div style={{ color: T.textDim, fontSize: 13, marginTop: 6, lineHeight: 1.5 }}>{hint}</div>
+      )}
+      {!loading && action && <div style={{ marginTop: 14 }}>{action}</div>}
+    </div>
+  );
+}
+
+export function Table({ head, children, empty, loading = false }) {
+  // The table decides whether it is empty by counting its own rows, so a
+  // caller cannot forget the check or get the condition backwards.
+  const rows = React.Children.count(children);
+  const state = typeof empty === 'string' ? { title: empty } : empty;
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse', font: `14px ${FONT}` }}>
@@ -83,7 +119,9 @@ export function Table({ head, children, empty }) {
         </thead>
         <tbody>{children}</tbody>
       </table>
-      {empty && <p style={{ color: T.textDim, fontSize: 14, padding: '14px 10px', margin: 0 }}>{empty}</p>}
+      {rows === 0 && (loading
+        ? <EmptyState loading />
+        : (state && (React.isValidElement(state) ? state : <EmptyState {...state} />)))}
     </div>
   );
 }
@@ -123,3 +161,29 @@ export function Modal({ title, children, onClose, actions }) {
 }
 
 export { button };
+
+/**
+ * Grouping within a page. Settings is eight unrelated panels — locations,
+ * numbering, fonts, sign-on — and a single scroll makes finding one a hunt.
+ */
+export function SubTabs({ tabs, active, onChange }) {
+  return (
+    <div style={{
+      display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 16,
+      borderBottom: `1px solid ${T.border}`, paddingBottom: 2,
+    }}>
+      {tabs.map(([key, label]) => {
+        const on = key === active;
+        return (
+          <button key={key} onClick={() => onChange(key)} style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            padding: '9px 14px', font: `${on ? 700 : 500} 14px ${FONT}`,
+            color: on ? T.blue : T.textDim,
+            borderBottom: `2px solid ${on ? T.blue : 'transparent'}`,
+            marginBottom: -3,
+          }}>{label}</button>
+        );
+      })}
+    </div>
+  );
+}

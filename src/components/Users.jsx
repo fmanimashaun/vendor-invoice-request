@@ -86,7 +86,12 @@ export default function Users() {
         </p>
 
         <Table head={['Name', 'Email', 'Roles', 'Status', '']}
-               empty={users && users.length === 0 ? 'No staff yet.' : null}>
+               loading={users === null}
+               empty={{
+                 title: 'No staff yet',
+                 hint: 'Add someone below. Members raise requests; admins onboard '
+                   + 'vendors and manage this page.',
+               }}>
           {(users || []).map((u) => {
             const off = u.status !== 'active';
             return (
@@ -109,9 +114,7 @@ export default function Users() {
             );
           })}
         </Table>
-        {users === null && (
-          <p style={{ color: T.textDim, fontSize: 14, padding: '14px 10px', margin: 0 }}>Loading…</p>
-        )}
+
       </Card>
 
       <Card title="Add a member of staff">

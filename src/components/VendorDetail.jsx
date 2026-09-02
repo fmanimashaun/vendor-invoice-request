@@ -204,7 +204,11 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
           enter them exactly as they should appear.
         </p>
         <Table head={['Name', 'Job title', 'Email', 'Phone', 'Status', '']}
-               empty={reps.length === 0 ? 'No representatives yet — nothing can be approved.' : null}>
+               empty={{
+                 title: 'No representatives yet',
+                 hint: 'Until this vendor has someone who can sign in, it cannot approve '
+                   + 'a request or issue an invoice.',
+               }}>
           {reps.map((u) => {
             const off = u.status !== 'active';
             return (

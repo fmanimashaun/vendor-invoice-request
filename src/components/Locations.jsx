@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { T, FONT, input as inputStyle } from '../theme.js';
-import { Card, Field, Table, Td, Banner, button } from './Shell.jsx';
+import { Card, Field, Table, Td, Banner, button , SubTabs } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import { naira } from '../../shared/reference.js';
 
@@ -20,6 +20,7 @@ const BLANK_BU = { code: '', name: '', numbering_site: '' };
  * duplicate protection at all.
  */
 export default function Locations({ feeKobo, orgName, onSaved }) {
+  const [sub, setSub]       = useState('locations');
   const [ref, setRef]       = useState(null);
   const [site, setSite]     = useState(BLANK_SITE);
   const [bu, setBu]         = useState(BLANK_BU);
@@ -135,8 +136,8 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
   const buSites = ref?.buSites ?? {};
   const busFor = (code) => bus.filter((b) => (buSites[b.code] || []).includes(code));
 
-  return (
-    <>
+  const PANES = {
+    locations: <>
       <Card title="Locations">
         <Banner onClose={() => setError(null)}>{error}</Banner>
         <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
@@ -147,7 +148,12 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
         </p>
 
         <Table head={['Code', 'Name', 'Billed by', 'Status', '']}
-               empty={ref && sites.length === 0 ? 'No locations yet.' : null}>
+               loading={!ref}
+               empty={{
+                 title: 'No locations yet',
+                 hint: 'Add one below. A location must exist before anyone can raise a '
+                   + 'request against it.',
+               }}>
           {sites.map((s) => {
             const off = s.status !== 'active';
             return (
@@ -204,10 +210,14 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           </button>
         </form>
       </Card>
-
       <Card title="Business units">
         <Table head={['Code', 'Name', 'Numbering site', 'Locations', 'Status', '']}
-               empty={ref && bus.length === 0 ? 'No business units yet.' : null}>
+               loading={!ref}
+               empty={{
+                 title: 'No business units yet',
+                 hint: 'A unit groups the locations it is billed for and supplies the '
+                   + 'numbering site for unit-wide requests.',
+               }}>
           {bus.map((b) => {
             const off = b.status !== 'active';
             return (
@@ -271,7 +281,6 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           </button>
         </form>
       </Card>
-
       <Card title="Which locations each unit may bill for">
         <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
           A location can belong to more than one unit — Lekki is billed by both
@@ -313,63 +322,67 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           </table>
         </div>
       </Card>
-
-      <Card title="Staff single sign-on">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 6px', lineHeight: 1.5 }}>
-          Optional. Until it is set up, your staff sign in with a password.
-          Vendors always use a password — they are not in your directory — so
-          this only ever affects your own people.
+    </>,
+    organisation: <>
+      <Card title="Organisation">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          Your organisation's name, as shown in the header and printed as the
+          salutation on every invoice issued from this deployment. Nothing about
+          any particular company is built into the code — this is where it is set.
         </p>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
-          Switching it on does <strong style={{ color: T.text }}>not</strong> cut
-          passwords off straight away. That happens automatically the first time
-          somebody actually completes a sign-on, so a wrong setting cannot lock
-          you out of your own admin.
+        <Field label="Organisation name">
+          <input style={{ ...inputStyle, maxWidth: 360 }} value={org}
+                 onChange={(e) => setOrg(e.target.value)} placeholder="Example Group" />
+        </Field>
+      </Card>
+      <Card title="Indicative processing fee">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          Shown on the request form so the requester sees a total. It is a
+          placeholder: the fee actually billed belongs to whichever vendor
+          approves the request, and is set by that vendor.
         </p>
-
-        {ssoCfg && (
-          <div style={{
-            border: `1px solid ${T.border}`, borderRadius: 8, padding: '10px 13px',
-            marginBottom: 16, fontSize: 13, color: T.textDim, lineHeight: 1.6,
-          }}>
-            <div>Single sign-on: <strong style={{ color: ssoCfg.enabled ? T.green : T.textDim }}>
-              {ssoCfg.enabled ? 'on' : 'off'}</strong></div>
-            <div>Proven to work: <strong style={{ color: ssoCfg.verified ? T.green : T.amber }}>
-              {ssoCfg.verified ? `yes, ${ssoCfg.verifiedAt}` : 'not yet'}</strong></div>
-            <div>Staff password sign-in: <strong style={{ color: ssoCfg.clientPassword ? T.amber : T.green }}>
-              {ssoCfg.clientPassword ? 'still available' : 'disabled'}</strong></div>
-          </div>
-        )}
-
-        <form onSubmit={saveSso}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: '0 16px' }}>
-            <Field label="Team domain" hint="From Cloudflare Zero Trust.">
-              <input style={inputStyle} value={sso.team_domain}
-                     onChange={(e) => setSso({ ...sso, team_domain: e.target.value })}
-                     placeholder="yourteam.cloudflareaccess.com" />
-            </Field>
-            <Field label="Application AUD tag" hint="From the Access application.">
-              <input style={inputStyle} value={sso.aud}
-                     onChange={(e) => setSso({ ...sso, aud: e.target.value })} />
-            </Field>
-            <Field label="Allowed email domains"
-                   hint="Comma separated. Only these get an account on first sign-in.">
-              <input style={inputStyle} value={sso.allowed_domains}
-                     onChange={(e) => setSso({ ...sso, allowed_domains: e.target.value })}
-                     placeholder="yourcompany.com" />
-            </Field>
-          </div>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 16px', fontSize: 14 }}>
-            <input type="checkbox" checked={sso.enabled}
-                   onChange={(e) => setSso({ ...sso, enabled: e.target.checked })} />
-            Offer single sign-on on the login screen
-          </label>
-          <button type="submit" disabled={busy} style={button('primary', busy)}>
-            Save sign-on settings
-          </button>
+        <form onSubmit={saveFee}>
+          <Field label="Fee (₦)" hint={`Currently ${naira(feeKobo ?? 0)}.`}>
+            <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0" step="0.01"
+                   value={fee} onChange={(e) => setFee(e.target.value)} />
+          </Field>
+          <button type="submit" disabled={busy} style={button('primary', busy)}>Save settings</button>
         </form>
       </Card>
-
+    </>,
+    invoicing: <>
+      <Card title="Invoice numbering">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 12px', lineHeight: 1.5 }}>
+          Invoice numbers must never repeat. Your approvals system already holds
+          the ones issued so far and will reject a duplicate, which blocks a
+          legitimate payment.
+        </p>
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
+          This matters when the system is <strong style={{ color: T.text }}>rebuilt
+          somewhere else</strong> — another Cloudflare account, in-house
+          infrastructure — and the data does not come with it. A fresh
+          deployment starts at 1 and would reissue numbers you have already
+          used. Set the floor above every number ever issued and it cannot.
+        </p>
+        {numbering && (
+          <div style={{
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: '9px 12px',
+            marginBottom: 14, fontSize: 13, color: T.textDim, lineHeight: 1.6,
+          }}>
+            <div>Highest sequence issued here: <strong style={{ color: T.text }}>
+              {numbering.highestSeq}</strong></div>
+            <div>Most recent invoice: <strong style={{ color: T.text }}>
+              {numbering.latestInvoiceNo || 'none yet'}</strong></div>
+            <div>Current floor: <strong style={{ color: T.text }}>
+              {numbering.seqFloor || 'none'}</strong></div>
+          </div>
+        )}
+        <Field label="Start sequences above"
+               hint="Can only be raised. Leave at 0 on a first deployment.">
+          <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0"
+                 value={floor} onChange={(e) => setFloor(e.target.value)} />
+        </Field>
+      </Card>
       <Card title="Fonts">
         <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
           Assigned to a vendor during onboarding so their invoice matches their
@@ -379,7 +392,11 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           nothing is fetched from a font service when an invoice is rendered.
         </p>
         <Table head={['Font', 'Stands in for', 'Kind', 'Source', '']}
-               empty={fonts.length === 0 ? 'No fonts loaded.' : null}>
+               empty={{
+                 title: 'No fonts loaded',
+                 hint: 'Run scripts/fetch-fonts.mjs to pull the bundled catalogue, or '
+                   + 'upload one below.',
+               }}>
           {fonts.map((f) => (
             <tr key={f.key}>
               <Td>{f.name} <span style={{ color: T.textDim }}>({f.key})</span></Td>
@@ -448,66 +465,79 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           </button>
         </form>
       </Card>
+    </>,
+    signin: <>
+      <Card title="Staff single sign-on">
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 6px', lineHeight: 1.5 }}>
+          Optional. Until it is set up, your staff sign in with a password.
+          Vendors always use a password — they are not in your directory — so
+          this only ever affects your own people.
+        </p>
+        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
+          Switching it on does <strong style={{ color: T.text }}>not</strong> cut
+          passwords off straight away. That happens automatically the first time
+          somebody actually completes a sign-on, so a wrong setting cannot lock
+          you out of your own admin.
+        </p>
 
-      <Card title="Organisation">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Your organisation's name, as shown in the header and printed as the
-          salutation on every invoice issued from this deployment. Nothing about
-          any particular company is built into the code — this is where it is set.
-        </p>
-        <Field label="Organisation name">
-          <input style={{ ...inputStyle, maxWidth: 360 }} value={org}
-                 onChange={(e) => setOrg(e.target.value)} placeholder="Example Group" />
-        </Field>
-      </Card>
-
-      <Card title="Invoice numbering">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 12px', lineHeight: 1.5 }}>
-          Invoice numbers must never repeat. Your approvals system already holds
-          the ones issued so far and will reject a duplicate, which blocks a
-          legitimate payment.
-        </p>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          This matters when the system is <strong style={{ color: T.text }}>rebuilt
-          somewhere else</strong> — another Cloudflare account, in-house
-          infrastructure — and the data does not come with it. A fresh
-          deployment starts at 1 and would reissue numbers you have already
-          used. Set the floor above every number ever issued and it cannot.
-        </p>
-        {numbering && (
+        {ssoCfg && (
           <div style={{
-            border: `1px solid ${T.border}`, borderRadius: 8, padding: '9px 12px',
-            marginBottom: 14, fontSize: 13, color: T.textDim, lineHeight: 1.6,
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: '10px 13px',
+            marginBottom: 16, fontSize: 13, color: T.textDim, lineHeight: 1.6,
           }}>
-            <div>Highest sequence issued here: <strong style={{ color: T.text }}>
-              {numbering.highestSeq}</strong></div>
-            <div>Most recent invoice: <strong style={{ color: T.text }}>
-              {numbering.latestInvoiceNo || 'none yet'}</strong></div>
-            <div>Current floor: <strong style={{ color: T.text }}>
-              {numbering.seqFloor || 'none'}</strong></div>
+            <div>Single sign-on: <strong style={{ color: ssoCfg.enabled ? T.green : T.textDim }}>
+              {ssoCfg.enabled ? 'on' : 'off'}</strong></div>
+            <div>Proven to work: <strong style={{ color: ssoCfg.verified ? T.green : T.amber }}>
+              {ssoCfg.verified ? `yes, ${ssoCfg.verifiedAt}` : 'not yet'}</strong></div>
+            <div>Staff password sign-in: <strong style={{ color: ssoCfg.clientPassword ? T.amber : T.green }}>
+              {ssoCfg.clientPassword ? 'still available' : 'disabled'}</strong></div>
           </div>
         )}
-        <Field label="Start sequences above"
-               hint="Can only be raised. Leave at 0 on a first deployment.">
-          <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0"
-                 value={floor} onChange={(e) => setFloor(e.target.value)} />
-        </Field>
-      </Card>
 
-      <Card title="Indicative processing fee">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Shown on the request form so the requester sees a total. It is a
-          placeholder: the fee actually billed belongs to whichever vendor
-          approves the request, and is set by that vendor.
-        </p>
-        <form onSubmit={saveFee}>
-          <Field label="Fee (₦)" hint={`Currently ${naira(feeKobo ?? 0)}.`}>
-            <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0" step="0.01"
-                   value={fee} onChange={(e) => setFee(e.target.value)} />
-          </Field>
-          <button type="submit" disabled={busy} style={button('primary', busy)}>Save settings</button>
+        <form onSubmit={saveSso}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: '0 16px' }}>
+            <Field label="Team domain" hint="From Cloudflare Zero Trust.">
+              <input style={inputStyle} value={sso.team_domain}
+                     onChange={(e) => setSso({ ...sso, team_domain: e.target.value })}
+                     placeholder="yourteam.cloudflareaccess.com" />
+            </Field>
+            <Field label="Application AUD tag" hint="From the Access application.">
+              <input style={inputStyle} value={sso.aud}
+                     onChange={(e) => setSso({ ...sso, aud: e.target.value })} />
+            </Field>
+            <Field label="Allowed email domains"
+                   hint="Comma separated. Only these get an account on first sign-in.">
+              <input style={inputStyle} value={sso.allowed_domains}
+                     onChange={(e) => setSso({ ...sso, allowed_domains: e.target.value })}
+                     placeholder="yourcompany.com" />
+            </Field>
+          </div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 16px', fontSize: 14 }}>
+            <input type="checkbox" checked={sso.enabled}
+                   onChange={(e) => setSso({ ...sso, enabled: e.target.checked })} />
+            Offer single sign-on on the login screen
+          </label>
+          <button type="submit" disabled={busy} style={button('primary', busy)}>
+            Save sign-on settings
+          </button>
         </form>
       </Card>
+    </>,
+  };
+
+  return (
+    <>
+      <SubTabs
+        tabs={[
+          ['locations', 'Locations & units'],
+          ['organisation', 'Organisation'],
+          ['invoicing', 'Invoicing'],
+          ['signin', 'Sign-in'],
+        ]}
+        active={sub}
+        onChange={setSub}
+      />
+      {PANES[sub]}
     </>
   );
 }

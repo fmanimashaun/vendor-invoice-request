@@ -1590,7 +1590,10 @@ async function listRequests(request, env, me, url) {
   const { results } = await env.DB.prepare(
     `SELECT r.*, u.full_name AS created_by_name, u.email AS created_by_email,
             d.full_name AS decided_by_name, i.invoice_no,
-            i.approver_name, i.approver_title, i.total_kobo AS issued_total_kobo,
+            i.approver_name, i.approver_title, i.amount_kobo AS issued_amount_kobo,
+            i.vat_kobo AS issued_vat_kobo,
+            i.wht_kobo AS issued_wht_kobo,
+            i.total_kobo AS issued_total_kobo,
             i.fee_kobo AS issued_fee_kobo, dv.name AS decided_vendor_name
        FROM requests r
        JOIN users u ON u.id = r.created_by

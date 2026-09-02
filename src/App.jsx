@@ -4,7 +4,7 @@ import { Card, Field, Banner, button } from './components/Shell.jsx';
 import RequestForm from './components/RequestForm.jsx';
 import Queue from './components/Queue.jsx';
 import History from './components/History.jsx';
-import Requests from './components/Requests.jsx';
+import RequestTable from './components/RequestTable.jsx';
 import Vendors from './components/Vendors.jsx';
 import Users from './components/Users.jsx';
 import Dashboard from './components/Dashboard.jsx';
@@ -250,9 +250,13 @@ export default function App() {
         )}
         {tab === 'history' && (isVendor
           ? <History requests={requests} me={user} acting={acting} onChanged={refresh} />
-          : <Requests requests={requests} me={user} acting={acting} />
+          : <RequestTable
+              title={clientAdmin ? 'All requests' : 'My requests'}
+              requests={requests}
+              showVendorFilter={clientAdmin}
+            />
         )}
-        {tab === 'dashboard' && <Dashboard />}
+        {tab === 'dashboard' && <Dashboard requests={requests} onSeeAll={() => setTab('history')} />}
         {tab === 'vendors' && <Vendors />}
         {tab === 'users' && <Users />}
         {tab === 'locations' && (

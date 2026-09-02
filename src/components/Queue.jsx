@@ -102,7 +102,11 @@ export default function Queue({ requests, me, onChanged }) {
 
       <Table
         head={['Request', 'For', 'Type', 'Period', 'Detail', { label: 'Total', right: true }, 'Raised by', '']}
-        empty={pending.length === 0 ? 'Nothing pending. All caught up.' : null}
+        empty={{
+          title: 'Nothing pending',
+          hint: 'All caught up. New requests appear here the moment they are raised, '
+            + 'for every vendor at once — first to approve takes it.',
+        }}
       >
         {pending.map((r) => (
           <tr key={r.id}>
