@@ -61,8 +61,63 @@ function Changes({ before, after }) {
   );
 }
 
+/**
+ * Says plainly whether the record can be trusted, and refuses to say yes on
+ * thin evidence. A verifier that cannot reach its anchor reports "cannot
+ * confirm" — a green tick nobody checked is worse than no tick.
+ */
+function Integrity({ proof }) {
+  if (!proof) {
+    return (
+      <Banner kind="warn">
+        Could not verify the record just now. The entries below are shown
+        as stored, but nothing here confirms they are unaltered.
+      </Banner>
+    );
+  }
+  if (proof.ok) {
+    return (
+      <Banner kind="ok">
+        <strong>Verified.</strong> All {proof.entries} entries are chained and
+        intact, and the head matches an anchor held in separate storage — so
+        neither an edit nor a removal has happened, including from outside the
+        application.
+        {proof.head && (
+          <div style={{ fontSize: 12, color: T.textDim, marginTop: 6,
+                        fontFamily: 'ui-monospace, Menlo, monospace', wordBreak: 'break-all' }}>
+            head {proof.head}
+          </div>
+        )}
+      </Banner>
+    );
+  }
+  const anchorNote = {
+    mismatch: 'The head does not match the anchor held in separate storage, '
+      + 'which is what a wholesale rewrite looks like.',
+    behind: 'The anchor is behind the table: entries exist that were never anchored.',
+    missing: 'There is no anchor to compare against.',
+    unavailable: 'The anchor could not be read, so this could not be cross-checked.',
+  }[proof.anchorState];
+  return (
+    <Banner>
+      <strong>This record has been altered.</strong>
+      {proof.problems?.length > 0 && (
+        <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+          {proof.problems.slice(0, 5).map((x) => (
+            <li key={`${x.id}-${x.kind}`} style={{ marginBottom: 4 }}>
+              Entry {x.id} ({(x.at || '').slice(0, 19)}) — {x.detail}
+            </li>
+          ))}
+        </ul>
+      )}
+      {anchorNote && <div style={{ marginTop: 8 }}>{anchorNote}</div>}
+    </Banner>
+  );
+}
+
 export default function Audit() {
   const [data, setData]   = useState(null);
+  const [proof, setProof] = useState(null);
   const [error, setError] = useState(null);
   const [action, setAction] = useState('');
   const [actor, setActor]   = useState('');
@@ -76,7 +131,14 @@ export default function Audit() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      setData(await api.audit());
+      const [entries, verified] = await Promise.all([
+        api.audit(),
+        // Never block the list on the check. A verifier that fails to answer
+        // must read as "cannot confirm", not as a clean bill of health.
+        api.auditVerify().catch(() => null),
+      ]);
+      setData(entries);
+      setProof(verified);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load the audit trail.');
       setData({ entries: [], total: 0, actions: [] });
@@ -125,10 +187,13 @@ export default function Audit() {
       }
     >
       <Banner onClose={() => setError(null)}>{error}</Banner>
+      <Integrity proof={proof} />
       <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-        Append-only. Nothing in this application edits or deletes an entry.
-        Passwords are never recorded; a bank account number appears only in the
-        one event whose subject is that it changed.
+        Append-only, and the database enforces it: an UPDATE or DELETE against
+        this table is refused even from outside the application. Every entry is
+        also chained to the one before it, so an edit made by removing that
+        guard still shows up here. Passwords are never recorded; a bank account
+        number appears only in the one event whose subject is that it changed.
       </p>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 14 }}>

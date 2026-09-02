@@ -361,6 +361,37 @@ over in person. Because the admin then knows it, the account is flagged
 it, bar the routes needed to do so (`/api/bootstrap`, `/api/me`,
 `/api/auth/password`, `/api/auth/logout`).
 
+**A brand-new account starts in that state too**, not just a reset one. The
+admin typed that password, so it is shared knowledge rather than a secret from
+the moment the account exists, and an account left running indefinitely on a
+password someone else knows is the state you least want and the easiest to
+reach by accident.
+
+Both the create and the reset form carry one checkbox — *make them choose their
+own password at next sign-in* — **ticked by default**. The server reads it as
+`b.must_change_password === false ? 0 : 1`, so an omitted field means yes: a
+caller that forgets the flag gets the safe behaviour, not the convenient one.
+Unticking is a deliberate act and the audit trail records which way it went.
+
+One dialog serves both rosters (`SetPassword.jsx`), so the default cannot end
+up different depending on whether you opened client staff or a vendor's reps.
+
+### Nobody can change their own name or email
+
+There is no route that updates `users.full_name` or `users.email` — not for the
+owner, not for an admin. The Account page shows them read-only.
+
+The name is printed in the signature block of every invoice that person
+approves. Letting an approver edit it would let them quietly change who an
+issued invoice appears to have come from. Issued invoices keep their own copy
+(see invariant 3), so the past is safe either way, but the live roster should
+change only through the admin who owns it. The email is the join key that
+identifies one human, and `users.email` is UNIQUE.
+
+Changing your own password requires your current one, so an unattended session
+cannot be used to take the account over — and for the same reason an admin
+cannot reset *their own* password through the admin route.
+
 That gate sits **directly after authentication**, not at the bottom of the
 router. It was first written below the business routes, where it caught only
 unmatched paths and protected nothing. A guard placed after the routes it

@@ -47,6 +47,7 @@ export const api = {
   fonts:       ()               => call('/fonts'),
   numbering:   ()               => call('/numbering'),
   audit:       (params = '')    => call(`/audit${params}`),
+  auditVerify: ()               => call('/audit/verify'),
   ssoConfig:   ()               => call('/sso-config'),
   saveSsoConfig: (c)            => call('/sso-config', { method: 'PUT', body: c }),
   deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),
@@ -86,7 +87,9 @@ export const api = {
   clientUsers: ()               => call('/users?org=client'),
   createUser:  (u)              => call('/users', { method: 'POST', body: u }),
   setUserStatus: (id, status)   => call(`/users/${id}/status`, { method: 'POST', body: { status } }),
-  resetPassword: (id, password) => call(`/users/${id}/password`, { method: 'POST', body: { password } }),
+  resetPassword: (id, password, must_change_password = true) =>
+    call(`/users/${id}/password`, { method: 'POST',
+      body: { password, must_change_password } }),
   changePassword: (current_password, password) =>
     call('/auth/password', { method: 'POST', body: { current_password, password } }),
 

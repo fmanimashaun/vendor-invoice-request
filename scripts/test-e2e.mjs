@@ -1038,7 +1038,10 @@ check('a vendor user still needs a job title and phone', r.status === 400, JSON.
 // Admins can add admins, and the last one cannot be removed.
 r = await call('reladmin', '/api/users', { method: 'POST', body: {
   org: 'client', email: 'admin2@client.example', full_name: 'Second Admin',
-  roles: ['admin'], password: 'a-long-enough-password' } });
+  roles: ['admin'], password: 'a-long-enough-password',
+  // This fixture is about roster rules, not the first-sign-in gate, and every
+  // new account now starts needing a password change.
+  must_change_password: false } });
 check('an admin can add another admin', r.status === 201, JSON.stringify(r.data));
 const admin2 = r.data?.user?.id;
 
@@ -1878,6 +1881,251 @@ check('a range with nothing in it returns nothing, not everything',
 check('the action list is offered for the filter UI',
   Array.isArray(r.data?.actions) && r.data.actions.length > 0,
   JSON.stringify(r.data?.actions));
+
+// == Passwords: whose they are, and when you must change one ==========
+
+// A new account starts in the must-change state, because the admin typed the
+// password and therefore knows it. Nothing is a secret that two people know.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', full_name: 'Fresh Starter', email: 'fresh@client.example',
+  roles: ['member'], password: 'a-perfectly-fine-passphrase' } });
+check('a new account is created', r.status === 201, JSON.stringify(r.data));
+const freshId = r.data?.user?.id;
+check('and must change its password at first sign-in',
+  DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?').get(freshId).m === 1,
+  'flag not set');
+
+r = await call('fresh', '/api/auth/login', { method: 'POST', body: {
+  email: 'fresh@client.example', password: 'a-perfectly-fine-passphrase' } });
+check('they can sign in', r.status === 200, JSON.stringify(r.data));
+check('and the session says the password must change',
+  r.data?.user?.must_change_password === true || r.data?.mustChangePassword === true
+    || r.data?.user?.mustChangePassword === true,
+  JSON.stringify(r.data?.user));
+
+// Everything is closed until they replace it. Not "most things".
+r = await call('fresh', '/api/requests');
+check('nothing else is reachable while the password must change',
+  r.status === 403 && r.data?.error === 'password_change_required', JSON.stringify(r.data));
+r = await call('fresh', '/api/requests', { method: 'POST', body: {
+  bu_code: 'RFC', site_code: 'GBG', type_code: 'ELEC', period: '2026-09',
+  amount: '1000', asset_key: '1234' } });
+check('nor can they raise a request', r.status === 403, JSON.stringify(r.data?.error));
+
+// The routes needed to get out of the state stay open.
+r = await call('fresh', '/api/bootstrap');
+check('but bootstrap is open, so the form can render', r.status === 200, String(r.status));
+
+// Changing it needs the current one, so an unattended session cannot take the
+// account over.
+r = await call('fresh', '/api/auth/password', { method: 'POST', body: {
+  current_password: 'not-the-right-one', password: 'another-good-passphrase' } });
+check('the wrong current password is refused', r.status === 401, JSON.stringify(r.data?.error));
+
+r = await call('fresh', '/api/auth/password', { method: 'POST', body: {
+  current_password: 'a-perfectly-fine-passphrase', password: 'another-good-passphrase' } });
+check('the right one lets them set their own', r.status === 200, JSON.stringify(r.data));
+check('and the flag is cleared',
+  DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?').get(freshId).m === 0,
+  'flag still set');
+r = await call('fresh', '/api/requests');
+check('the app opens up once they have', r.status === 200, String(r.status));
+
+// A user cannot change their own name or email. There is no route at all:
+// the name is printed in the signature block of every invoice this person
+// approves, so being able to edit it would let an approver quietly change who
+// an issued invoice appears to have come from.
+for (const body of [{ full_name: 'Someone Else' }, { email: 'someone.else@client.example' }]) {
+  r = await call('fresh', '/api/me', { method: 'PUT', body });
+  check(`PUT /api/me ${Object.keys(body)[0]} is not a route`, r.status === 404, String(r.status));
+  r = await call('fresh', '/api/users/' + freshId, { method: 'PUT', body });
+  check(`nor can they PUT their own user row (${Object.keys(body)[0]})`,
+    r.status === 404 || r.status === 403, String(r.status));
+}
+
+// An admin reset puts them back in the must-change state by default...
+r = await call('reladmin', '/api/users/' + freshId + '/password', { method: 'POST', body: {
+  password: 'admin-chose-this-one' } });
+check('an admin reset defaults to requiring a change',
+  r.status === 200 && r.data?.mustChange === true, JSON.stringify(r.data));
+check('and the flag is set again',
+  DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?').get(freshId).m === 1,
+  'flag not set');
+
+// ...and the admin can deliberately turn that off.
+r = await call('reladmin', '/api/users/' + freshId + '/password', { method: 'POST', body: {
+  password: 'admin-chose-another-one', must_change_password: false } });
+check('unticking the box is honoured',
+  r.status === 200 && r.data?.mustChange === false, JSON.stringify(r.data));
+check('so the account is usable straight away',
+  DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?').get(freshId).m === 0,
+  'flag set when it should not be');
+r = await call('fresh', '/api/auth/login', { method: 'POST', body: {
+  email: 'fresh@client.example', password: 'admin-chose-another-one' } });
+r = await call('fresh', '/api/requests');
+check('and they are not stopped at the password screen', r.status === 200, String(r.status));
+
+// The same choice exists when creating an account.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', full_name: 'No Change Needed', email: 'nochange@client.example',
+  roles: ['member'], password: 'yet-another-good-phrase', must_change_password: false } });
+check('creating with the box unticked skips the forced change',
+  r.status === 201
+  && DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?')
+       .get(r.data.user.id).m === 0,
+  JSON.stringify(r.data?.user));
+
+// An admin cannot reset their OWN password through the admin route: changing
+// yours requires the current one, so an unattended admin session is not a way
+// to take over the account it is signed in to.
+const selfId = DB.db.prepare("SELECT id FROM users WHERE email = 'roster.admin@client.example'").get().id;
+r = await call('reladmin', '/api/users/' + selfId + '/password', { method: 'POST', body: {
+  password: 'trying-to-reset-myself' } });
+check('an admin cannot reset their own password that way',
+  r.status >= 400 && r.status < 500, JSON.stringify(r.data));
+check('and is told where to go instead',
+  /current one/.test(r.data?.message || ''), r.data?.message);
+
+// A vendor rep is created the same way, with the same default.
+const alphaVendorId = DB.db.prepare("SELECT id FROM vendors WHERE code = 'alpha'").get().id;
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'vendor', vendor_id: alphaVendorId, full_name: 'New Rep', email: 'newrep@alpha.example',
+  roles: ['approver'], job_title: 'Analyst', phone: '+234 800 000 0000',
+  password: 'rep-needs-a-passphrase' } });
+check('a vendor rep also starts needing a password change',
+  r.status === 201
+  && DB.db.prepare('SELECT must_change_password AS m FROM users WHERE id = ?')
+       .get(r.data.user.id).m === 1,
+  JSON.stringify(r.data?.user));
+
+r = await call('newrep', '/api/auth/login', { method: 'POST', body: {
+  email: 'newrep@alpha.example', password: 'rep-needs-a-passphrase' } });
+r = await call('newrep', '/api/requests');
+check('and cannot approve anything until they have changed it',
+  r.status === 403 && r.data?.error === 'password_change_required', JSON.stringify(r.data));
+
+// Creating an account is worth recording: it is the moment someone gains access.
+r = await call('reladmin', '/api/audit?action=USER_CREATED');
+check('account creation is in the audit trail',
+  r.status === 200 && r.data.entries.length > 0, String(r.data?.entries?.length));
+check('and it records whether a change was required',
+  r.data.entries.some((e) => /NOT required/.test(e.summary || ''))
+  && r.data.entries.some((e) => /must change/.test(e.summary || '')),
+  JSON.stringify(r.data.entries.map((e) => e.summary).slice(0, 4)));
+
+// == The audit trail cannot be edited ==================================
+//
+// Not "the app has no route for it" -- that was already true. These go around
+// the app entirely and speak to SQLite directly, which is what someone holding
+// the D1 credentials would do.
+
+const anyEntry = DB.db.prepare('SELECT * FROM audit_log ORDER BY id LIMIT 1').get();
+check('there is an entry to try to tamper with', !!anyEntry, JSON.stringify(anyEntry?.id));
+
+let refused = null;
+try {
+  DB.db.prepare("UPDATE audit_log SET actor_email = 'someone.else@evil.example' WHERE id = ?")
+    .run(anyEntry.id);
+} catch (e) { refused = String(e); }
+check('the DATABASE refuses a direct UPDATE of an entry',
+  refused !== null && /append-only/.test(refused), refused || 'the update succeeded');
+
+const stillThere = DB.db.prepare('SELECT actor_email FROM audit_log WHERE id = ?').get(anyEntry.id);
+check('and the row is untouched',
+  stillThere.actor_email === anyEntry.actor_email, stillThere.actor_email);
+
+refused = null;
+try {
+  DB.db.prepare('DELETE FROM audit_log WHERE id = ?').run(anyEntry.id);
+} catch (e) { refused = String(e); }
+check('the DATABASE refuses a direct DELETE of an entry',
+  refused !== null && /append-only/.test(refused), refused || 'the delete succeeded');
+
+refused = null;
+try {
+  DB.db.prepare('DELETE FROM audit_log').run();
+} catch (e) { refused = String(e); }
+check('and refuses a bulk DELETE too',
+  refused !== null && /append-only/.test(refused), refused || 'the delete succeeded');
+
+check('nothing was removed',
+  DB.db.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n > 0, 'empty');
+
+// == The chain proves it, even if the triggers are removed =============
+
+const NO_UPDATE = "CREATE TRIGGER audit_log_is_append_only_update BEFORE UPDATE ON audit_log"
+  + " BEGIN SELECT RAISE(ABORT, 'audit_log is append-only: entries cannot be modified'); END;";
+const NO_DELETE = "CREATE TRIGGER audit_log_is_append_only_delete BEFORE DELETE ON audit_log"
+  + " BEGIN SELECT RAISE(ABORT, 'audit_log is append-only: entries cannot be deleted'); END;";
+
+r = await call('reladmin', '/api/audit/verify');
+check('the chain verifies', r.status === 200 && r.data.ok === true, JSON.stringify(r.data));
+check('every entry is chained', r.data?.entries > 0, String(r.data?.entries));
+check('and an independent KV anchor agrees',
+  r.data?.anchorState === 'match', r.data?.anchorState);
+const goodHead = r.data.head;
+
+// Now do what someone with the credentials would: drop the guard, edit the
+// row, put the guard back. The triggers stop being the control here. The hash
+// chain is.
+DB.db.exec('DROP TRIGGER audit_log_is_append_only_update');
+DB.db.prepare("UPDATE audit_log SET actor_email = 'someone.else@evil.example' WHERE id = ?")
+  .run(anyEntry.id);
+DB.db.exec(NO_UPDATE);
+
+r = await call('reladmin', '/api/audit/verify');
+check('an edit made behind the app is DETECTED', r.data?.ok === false, JSON.stringify(r.data?.ok));
+check('and the altered entry is named',
+  r.data?.problems?.some((x) => x.id === anyEntry.id && x.kind === 'altered'),
+  JSON.stringify(r.data?.problems?.slice(0, 2)));
+check('the report says what it means in words a person can act on',
+  /edited since it was written/.test(r.data?.problems?.[0]?.detail || ''),
+  r.data?.problems?.[0]?.detail);
+
+DB.db.exec('DROP TRIGGER audit_log_is_append_only_update');
+DB.db.prepare('UPDATE audit_log SET actor_email = ? WHERE id = ?')
+  .run(anyEntry.actor_email, anyEntry.id);
+DB.db.exec(NO_UPDATE);
+r = await call('reladmin', '/api/audit/verify');
+check('restoring the exact original value verifies again', r.data?.ok === true,
+  JSON.stringify(r.data?.problems?.slice(0, 1)));
+
+// A removal in the middle breaks the link in the row that followed it.
+DB.db.exec('DROP TRIGGER audit_log_is_append_only_delete');
+const victimRow = DB.db.prepare('SELECT * FROM audit_log ORDER BY id LIMIT 1 OFFSET 1').get();
+DB.db.prepare('DELETE FROM audit_log WHERE id = ?').run(victimRow.id);
+r = await call('reladmin', '/api/audit/verify');
+check('a removed entry is DETECTED', r.data?.ok === false, JSON.stringify(r.data?.ok));
+check('and the break is reported as a broken link',
+  r.data?.problems?.some((x) => x.kind === 'broken_link'),
+  JSON.stringify(r.data?.problems?.slice(0, 2)));
+
+DB.db.prepare('INSERT INTO audit_log'
+  + ' (id, at, actor_id, actor_email, actor_name, actor_org, actor_context,'
+  + '  action, entity, entity_label, summary, before_json, after_json, prev_hash, hash)'
+  + ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+  victimRow.id, victimRow.at, victimRow.actor_id, victimRow.actor_email,
+  victimRow.actor_name, victimRow.actor_org, victimRow.actor_context,
+  victimRow.action, victimRow.entity, victimRow.entity_label, victimRow.summary,
+  victimRow.before_json, victimRow.after_json, victimRow.prev_hash, victimRow.hash);
+DB.db.exec(NO_DELETE);
+r = await call('reladmin', '/api/audit/verify');
+check('putting it back exactly restores the chain', r.data?.ok === true,
+  JSON.stringify(r.data?.problems?.slice(0, 1)));
+check('and the head is what it was before any of this', r.data?.head === goodHead,
+  `${r.data?.head} vs ${goodHead}`);
+
+// The anchor is the backstop against a rewrite that recomputed every hash.
+await env.ASSETS_KV.put('audit/head', JSON.stringify({ id: 1, hash: 'not-the-real-head' }));
+r = await call('reladmin', '/api/audit/verify');
+check('a head disagreeing with the KV anchor is never reported as verified',
+  r.data?.ok === false && r.data?.anchorState === 'mismatch', String(r.data?.anchorState));
+await env.ASSETS_KV.put('audit/head', JSON.stringify({ id: 0, hash: goodHead }));
+
+r = await call('victor', '/api/audit/verify');
+check('a vendor cannot verify the trail', r.status === 403, String(r.status));
+r = await call('nobody', '/api/audit/verify');
+check('nor can anyone without a session', r.status === 401, String(r.status));
 
 // ── Report ────────────────────────────────────────────────────────────
 

@@ -406,9 +406,59 @@ CREATE TABLE IF NOT EXISTS audit_log (
   summary       TEXT,                   -- one line for the reader
 
   before_json   TEXT,
-  after_json    TEXT
+  after_json    TEXT,
+
+  -- ── Tamper evidence ────────────────────────────────────────────────
+  --
+  -- Each row is chained to the one before it:
+  --
+  --     hash = SHA-256(prev_hash || canonical fields of this row)
+  --
+  -- Editing any past row, or removing one, changes what every later hash
+  -- should be, and /api/audit/verify walks the chain and names the first row
+  -- that no longer adds up. This does not PREVENT a rewrite — anyone holding
+  -- the D1 credentials can run any UPDATE they like — it makes one provable,
+  -- which is the property an auditor actually needs.
+  --
+  -- UNIQUE (prev_hash) is what keeps the chain a line rather than a tree. Two
+  -- concurrent writers that both read the same head would otherwise each
+  -- append a child to it, and the loser is retried instead. 'GENESIS' rather
+  -- than NULL for the first row, because SQLite treats NULLs in a unique index
+  -- as distinct and would happily accept a second chain start.
+  prev_hash     TEXT NOT NULL DEFAULT 'GENESIS',
+  hash          TEXT NOT NULL,
+
+  UNIQUE (prev_hash),
+  UNIQUE (hash)
 );
 
 CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log(at DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(action, at DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_entity ON audit_log(entity, at DESC);
+
+-- The database itself refuses to change an audit row.
+--
+-- The application has no route that updates or deletes one, but the
+-- application is not the only thing that can reach this table: anyone holding
+-- the D1 credentials can run arbitrary SQL, and those are exactly the people
+-- the log exists to hold accountable. These triggers make the store refuse,
+-- so `wrangler d1 execute --command="UPDATE audit_log ..."` fails the same way
+-- a route would.
+--
+-- This is not absolute. A trigger can be dropped by the same credentials that
+-- would edit the row. That is what the hash chain and the KV anchor are for:
+-- dropping the trigger, editing a row and recreating the trigger leaves a
+-- chain that no longer verifies, and /api/audit/verify names the row. The
+-- three together mean a rewrite is refused by default, and provable if the
+-- refusal is deliberately removed.
+CREATE TRIGGER IF NOT EXISTS audit_log_is_append_only_update
+BEFORE UPDATE ON audit_log
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log is append-only: entries cannot be modified');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_is_append_only_delete
+BEFORE DELETE ON audit_log
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log is append-only: entries cannot be deleted');
+END;

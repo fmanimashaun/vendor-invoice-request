@@ -3,8 +3,12 @@ import { T, FONT, input as inputStyle } from '../theme.js';
 import { Card, Field, Table, Td, Banner, button } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import { PASSWORD_HINT, MIN_LENGTH } from '../../shared/password.js';
+import SetPassword from './SetPassword.jsx';
 
-const BLANK = { full_name: '', email: '', roles: ['member'], password: '' };
+const BLANK = {
+  full_name: '', email: '', roles: ['member'], password: '',
+  must_change_password: true,
+};
 
 /**
  * Your own staff. Vendor representatives are managed inside each vendor, not
@@ -23,6 +27,7 @@ export default function Users() {
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
   const [ok, setOk]       = useState(null);
+  const [resetting, setResetting] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -64,15 +69,7 @@ export default function Users() {
     run(() => api.setUserStatus(u.id, next), u.id);
   };
 
-  const reset = (u) => {
-    const pw = prompt(`New password for ${u.full_name}.\n\n${PASSWORD_HINT}\n\n`
-      + 'They must change it at next sign-in, so read it out rather than writing it down.');
-    if (!pw) return;
-    run(async () => {
-      await api.resetPassword(u.id, pw);
-      return `Password set for ${u.full_name}. They must change it at next sign-in.`;
-    }, u.id);
-  };
+  const reset = (u) => setResetting(u);
 
   return (
     <>
@@ -117,6 +114,22 @@ export default function Users() {
 
       </Card>
 
+      {resetting && (
+        <SetPassword
+          user={resetting}
+          onClose={() => setResetting(null)}
+          onDone={(pw, mustChange) => {
+            setResetting(null);
+            run(async () => {
+              await api.resetPassword(resetting.id, pw, mustChange);
+              return `Password set for ${resetting.full_name}.`
+                + (mustChange ? ' They must change it at next sign-in.'
+                              : ' They were NOT asked to change it.');
+            }, resetting.id);
+          }}
+        />
+      )}
+
       <Card title="Add a member of staff">
         <form onSubmit={add}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: '0 16px' }}>
@@ -144,6 +157,14 @@ export default function Users() {
             </Field>
             <Field label="Password" hint={PASSWORD_HINT}>
               <input style={inputStyle} type="password" value={form.password} onChange={set('password')} />
+            </Field>
+            <Field label="First sign-in"
+                   hint="Leave this on unless you mean for them to keep the password you just typed.">
+              <label style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 38 }}>
+                <input type="checkbox" checked={form.must_change_password}
+                       onChange={(e) => setForm({ ...form, must_change_password: e.target.checked })} />
+                Make them choose their own password when they first sign in
+              </label>
             </Field>
           </div>
           <button type="submit" disabled={busy || !complete} style={button('primary', busy || !complete)}>

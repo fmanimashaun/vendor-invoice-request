@@ -5,6 +5,7 @@ import RequestForm from './components/RequestForm.jsx';
 import Queue from './components/Queue.jsx';
 import History from './components/History.jsx';
 import RequestTable from './components/RequestTable.jsx';
+import Account from './components/Account.jsx';
 import Vendors from './components/Vendors.jsx';
 import Users from './components/Users.jsx';
 import Dashboard from './components/Dashboard.jsx';
@@ -157,20 +158,25 @@ export default function App() {
     setTab(firstTab(user, next));
   }
 
-  const tabs = isVendor
-    ? [
-        ['queue',   pendingCount ? `Open queue (${pendingCount})` : 'Open queue'],
-        ['history', 'Approved by us'],
-      ]
-    : clientAdmin
+  // Everyone gets Account, and it goes last: it is where you go on purpose,
+  // not somewhere to land by default.
+  const tabs = [
+    ...(isVendor
       ? [
-          ['dashboard', 'Dashboard'],
-          ['history',   'Requests'],
-          ['vendors',   'Vendors'],
-          ['users',     'Staff'],
-          ['locations', 'Settings'],
+          ['queue',   pendingCount ? `Open queue (${pendingCount})` : 'Open queue'],
+          ['history', 'Approved by us'],
         ]
-      : [['new', 'New request'], ['history', 'My requests']];
+      : clientAdmin
+        ? [
+            ['dashboard', 'Dashboard'],
+            ['history',   'Requests'],
+            ['vendors',   'Vendors'],
+            ['users',     'Staff'],
+            ['locations', 'Settings'],
+          ]
+        : [['new', 'New request'], ['history', 'My requests']]),
+    ['account', 'Account'],
+  ];
 
   return (
     <div style={{ minHeight: '100vh', background: T.bg, color: T.text, font: `15px ${FONT}` }}>
@@ -257,6 +263,7 @@ export default function App() {
             />
         )}
         {tab === 'dashboard' && <Dashboard requests={requests} onSeeAll={() => setTab('history')} />}
+        {tab === 'account' && <Account me={user} acting={acting} />}
         {tab === 'vendors' && <Vendors />}
         {tab === 'users' && <Users />}
         {tab === 'locations' && (
@@ -303,7 +310,7 @@ function ChangePassword({ hint, onDone }) {
           own before carrying on.
         </p>
         <Card>
-          <Banner onClose={() => setError(null)}>{error || notice}</Banner>
+          <Banner onClose={() => setError(null)}>{error}</Banner>
           <form onSubmit={submit}>
             <Field label="Current password">
               <input style={inputStyle} type="password" autoFocus value={current}
@@ -377,7 +384,7 @@ function Login({ onDone, notice }) {
 
         {methods?.password && (
         <Card>
-          <Banner onClose={() => setError(null)}>{error}</Banner>
+          <Banner onClose={() => setError(null)}>{error || notice}</Banner>
           <form onSubmit={submit}>
             <Field label="Email">
               <input style={inputStyle} type="email" autoFocus value={email}

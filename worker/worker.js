@@ -228,6 +228,10 @@ async function route(request, env, url) {
   if (path === '/api/bu-sites' && method === 'POST')  return linkBuSite(request, env, me);
   if (path === '/api/platform-config' && method === 'PUT') return updatePlatformConfig(request, env, me);
   if (path === '/api/audit' && method === 'GET')       return listAudit(env, me, url);
+  if (path === '/api/audit/verify' && method === 'GET') {
+    const d = requireRosterAdmin(me);
+    return d || json(await verifyAuditChain(env));
+  }
   if (path === '/api/numbering' && method === 'GET')   return getNumbering(env, me);
   if (path === '/api/sso-config' && method === 'GET')  return getSsoConfig(env, me);
   if (path === '/api/sso-config' && method === 'PUT')  return putSsoConfig(request, env, me);
@@ -1131,21 +1135,28 @@ async function resetUserPassword(request, env, me, id) {
     return fail('weak_password', errs[0], 422, { errors: errs, hint: PASSWORD_HINT });
   }
 
+  // Same default and the same reasoning as account creation: the admin knows
+  // this password, so the account is not really secured until the owner picks
+  // their own. Unticking is a deliberate act.
+  const mustChange = b.must_change_password === false ? 0 : 1;
+
   const pw = await hashPassword(String(b.password));
   await env.DB.prepare(
     `UPDATE users SET pw_hash = ?1, pw_salt = ?2, pw_iterations = ?3,
-            must_change_password = 1
+            must_change_password = ?5
       WHERE id = ?4`,
-  ).bind(pw.hash, pw.salt, pw.iterations, id).run();
+  ).bind(pw.hash, pw.salt, pw.iterations, id, mustChange).run();
 
-  console.warn('PASSWORD_RESET_BY_ADMIN', me.email, target.email);
+  console.warn('PASSWORD_RESET_BY_ADMIN', me.email, target.email, mustChange ? 'must-change' : 'no-change-required');
   // The password itself never reaches the row — see REDACTED. What matters is
   // that an admin knows this account's secret until the owner replaces it.
   await audit(env, me, 'PASSWORD_RESET_BY_ADMIN', {
     entity: `user:${target.id}`, label: target.full_name,
-    summary: `Temporary password set for ${target.email}; they must change it at next sign-in`,
+    summary: `Password reset for ${target.email}`
+      + (mustChange ? '; they must change it at next sign-in'
+                    : '; NOT required to change it, at the admin\'s choice'),
   });
-  return json({ ok: true, mustChange: true });
+  return json({ ok: true, mustChange: !!mustChange });
 }
 
 /**
@@ -1528,15 +1539,32 @@ async function createUser(request, env, me) {
   }
   const pw = await hashPassword(String(b.password));
 
+  // Default ON, and it has to be asked for explicitly to turn off.
+  //
+  // The admin typed this password and hands it over in person, so it is not a
+  // secret yet — it is shared knowledge until the owner replaces it. Defaulting
+  // the other way would leave accounts running indefinitely on a password
+  // someone else knows, which is the state you least want and the easiest one
+  // to arrive at by accident. `=== false` rather than a truthiness check so an
+  // omitted field means "yes", not "no".
+  const mustChange = b.must_change_password === false ? 0 : 1;
+
   try {
     const r = await env.DB.prepare(
       `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
-                          pw_hash, pw_salt, pw_iterations, created_by, default_role)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) RETURNING *`,
+                          pw_hash, pw_salt, pw_iterations, created_by, default_role,
+                          must_change_password)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) RETURNING *`,
     ).bind(email, b.full_name, org, vendorId, roles.join(','), jobTitle || null, phone || null,
-           pw.hash, pw.salt, pw.iterations, me.email, defaultRole).first();
+           pw.hash, pw.salt, pw.iterations, me.email, defaultRole, mustChange).first();
     r.vendor_name = vendor?.name ?? null;
     r.vendor_code = vendor?.code ?? null;
+    await audit(env, me, 'USER_CREATED', {
+      entity: 'user:' + r.id, label: r.full_name,
+      summary: email + ' created as ' + org + '/' + roles.join(',')
+        + (mustChange ? ', must change password at first sign-in'
+                      : ', NOT required to change the password'),
+    });
     return json({ user: publicUser(r) }, 201);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return fail('duplicate', 'That email already exists.', 409);
@@ -2427,40 +2455,177 @@ export function diff(before, after) {
   return Object.keys(a).length ? { before: b, after: a } : null;
 }
 
+export const GENESIS = 'GENESIS';
+const AUDIT_HEAD_KEY = 'audit/head';
+
+const sha256Hex = async (text) => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+/**
+ * The exact bytes a row hash is taken over.
+ *
+ * Field order is fixed and values go in as a JSON array, so this is
+ * unambiguous: no separator that a value could itself contain, no key ordering
+ * to depend on. Changing this function invalidates every hash ever written, so
+ * if a field is added, append it at the end and bump the version.
+ */
+export const auditCanon = (r) => JSON.stringify([
+  1,
+  r.at, r.actor_id ?? null, r.actor_email, r.actor_name, r.actor_org,
+  r.actor_context ?? null, r.action, r.entity ?? null, r.entity_label ?? null,
+  r.summary ?? null, r.before_json ?? null, r.after_json ?? null,
+]);
+
+export const auditHash = (prev, row) => sha256Hex(prev + auditCanon(row));
+
+/**
+ * The head of the chain, kept in KV — a different store from D1.
+ *
+ * Same reasoning as the sequence watermark. Someone who rewrites the audit
+ * table can recompute every hash in it and leave a chain that verifies against
+ * itself; it cannot match an anchor held where the rewrite did not reach.
+ * Best-effort, because a KV failure must not block an approval, so a missing
+ * anchor reports as "cannot confirm" and never as "verified".
+ */
+async function writeAuditHead(env, row) {
+  try {
+    await env.ASSETS_KV?.put(AUDIT_HEAD_KEY, JSON.stringify({
+      id: row.id, hash: row.hash, at: row.at,
+    }));
+  } catch (e) {
+    console.warn('AUDIT_HEAD_WRITE_FAILED', row.id, String(e));
+  }
+}
+
 /**
  * Record something that happened.
  *
  * Deliberately never throws. A failure to log must not roll back a legitimate
  * approval or lock an admin out of fixing a bank account — the same call the
  * sequence watermark makes. The tradeoff is real and worth stating: this is an
- * audit trail, not a consensus log, and a lost row is possible. It writes to
- * the same D1 as the change itself, so in practice the only way to lose one is
- * for the write that preceded it to have already succeeded and the connection
- * to drop between the two.
+ * audit trail, not a consensus log, and a lost row is possible.
+ *
+ * Retries on a UNIQUE (prev_hash) collision, which is what a concurrent writer
+ * looks like: two readers see the same head, one wins, the loser re-reads and
+ * appends after it. Bounded, because failing to log beats looping forever.
  */
 export async function audit(env, me, action, {
   entity = null, label = null, summary = null, before = null, after = null,
 } = {}) {
-  try {
-    const d = (before || after) ? diff(before, after) : null;
-    await env.DB.prepare(
-      `INSERT INTO audit_log
-         (actor_id, actor_email, actor_name, actor_org, actor_context,
-          action, entity, entity_label, summary, before_json, after_json)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`,
-    ).bind(
-      me?.id ?? null,
-      me?.email ?? 'system',
-      me?.full_name ?? 'system',
-      me?.org ?? 'system',
-      me?.ctx ?? null,
-      action, entity, label, summary,
-      d?.before ? JSON.stringify(d.before) : null,
-      d?.after ? JSON.stringify(d.after) : null,
-    ).run();
-  } catch (e) {
-    console.error('AUDIT_WRITE_FAILED', action, entity, String(e));
+  const d = (before || after) ? diff(before, after) : null;
+  const base = {
+    actor_id: me?.id ?? null,
+    actor_email: me?.email ?? 'system',
+    actor_name: me?.full_name ?? 'system',
+    actor_org: me?.org ?? 'system',
+    actor_context: me?.ctx ?? null,
+    action,
+    entity,
+    entity_label: label,
+    summary,
+    before_json: d?.before ? JSON.stringify(d.before) : null,
+    after_json: d?.after ? JSON.stringify(d.after) : null,
+  };
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const head = await env.DB.prepare(
+        'SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1',
+      ).first();
+      const prev = head?.hash || GENESIS;
+      // `at` is part of the digest, so it is generated here rather than left
+      // to a column default the digest could not have seen.
+      const row = { ...base, at: new Date().toISOString().replace('T', ' ').slice(0, 19) };
+      const hash = await auditHash(prev, row);
+
+      const written = await env.DB.prepare(
+        `INSERT INTO audit_log
+           (at, actor_id, actor_email, actor_name, actor_org, actor_context,
+            action, entity, entity_label, summary, before_json, after_json,
+            prev_hash, hash)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+         RETURNING id, at, hash`,
+      ).bind(
+        row.at, row.actor_id, row.actor_email, row.actor_name, row.actor_org,
+        row.actor_context, row.action, row.entity, row.entity_label, row.summary,
+        row.before_json, row.after_json, prev, hash,
+      ).first();
+
+      await writeAuditHead(env, written);
+      return;
+    } catch (e) {
+      if (String(e).includes('UNIQUE')) continue;   // concurrent append; retry
+      console.error('AUDIT_WRITE_FAILED', action, entity, String(e));
+      return;
+    }
   }
+  console.error('AUDIT_WRITE_CONTENDED', action, entity);
+}
+
+/**
+ * Walk the chain and report the first row that does not add up.
+ *
+ * Every hash is recomputed from the row own contents, so an edit is caught by
+ * that row hash and a removal by the next row prev_hash. The head is then
+ * compared against the KV anchor, which is what catches a wholesale rewrite
+ * that was internally consistent.
+ */
+export async function verifyAuditChain(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT id, at, actor_id, actor_email, actor_name, actor_org, actor_context,
+            action, entity, entity_label, summary, before_json, after_json,
+            prev_hash, hash
+       FROM audit_log ORDER BY id ASC`,
+  ).all();
+  const rows = results || [];
+
+  let prev = GENESIS;
+  const problems = [];
+  for (const r of rows) {
+    if (r.prev_hash !== prev) {
+      problems.push({
+        id: r.id, at: r.at, kind: 'broken_link',
+        detail: 'This entry does not follow the one before it. An entry between '
+          + 'them was removed, or an earlier one was altered.',
+      });
+    }
+    const expect = await auditHash(r.prev_hash, r);
+    if (expect !== r.hash) {
+      problems.push({
+        id: r.id, at: r.at, kind: 'altered',
+        detail: 'The contents of this entry no longer match its own hash. It has '
+          + 'been edited since it was written.',
+      });
+    }
+    prev = r.hash;
+    if (problems.length >= 20) break;
+  }
+
+  let anchor = null;
+  let anchorState = 'unavailable';
+  try {
+    const raw = await env.ASSETS_KV?.get(AUDIT_HEAD_KEY);
+    anchor = raw ? JSON.parse(raw) : null;
+    if (!anchor) anchorState = rows.length ? 'missing' : 'empty';
+    else if (anchor.hash === prev) anchorState = 'match';
+    else if (rows.some((r) => r.hash === anchor.hash)) anchorState = 'behind';
+    else anchorState = 'mismatch';
+  } catch (e) {
+    console.warn('AUDIT_HEAD_READ_FAILED', String(e));
+  }
+
+  return {
+    entries: rows.length,
+    head: prev === GENESIS ? null : prev,
+    anchor,
+    anchorState,
+    problems,
+    // True only when the chain verifies AND an independent anchor agrees.
+    // An unreadable anchor is "cannot confirm", never "verified".
+    ok: problems.length === 0 && (anchorState === 'match' || anchorState === 'empty'),
+  };
 }
 
 /**

@@ -3,8 +3,14 @@ import { T, FONT, input as inputStyle } from '../theme.js';
 import { Card, Field, Table, Td, Banner, button } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import { PASSWORD_HINT, MIN_LENGTH } from '../../shared/password.js';
+import SetPassword from './SetPassword.jsx';
 
-const BLANK_REP = { full_name: '', job_title: '', email: '', phone: '', password: '' };
+// must_change_password defaults ON, matching client staff. The admin who
+// typed this password knows it until the rep replaces it.
+const BLANK_REP = {
+  full_name: '', job_title: '', email: '', phone: '', password: '',
+  must_change_password: true,
+};
 
 /**
  * One vendor, in full: payment and tax details, representatives, invoice
@@ -26,6 +32,7 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
   });
   const [reps, setReps]   = useState([]);
   const [rep, setRep]     = useState(BLANK_REP);
+  const [resetting, setResetting] = useState(null);
   const [tplJson, setTplJson] = useState('');
   const [tplMeta, setTplMeta] = useState(null);
   const [font, setFont]   = useState('arimo');
@@ -95,15 +102,7 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
     run(() => api.setUserStatus(u.id, next), u.id);
   };
 
-  const resetRep = (u) => {
-    const pw = prompt(`New password for ${u.full_name}.\n\n${PASSWORD_HINT}\n\n`
-      + 'They must change it at next sign-in, so read it out rather than writing it down.');
-    if (!pw) return;
-    run(async () => {
-      await api.resetPassword(u.id, pw);
-      return `Password set for ${u.full_name}.`;
-    }, u.id);
-  };
+  const resetRep = (u) => setResetting(u);
 
   const parseTpl = () => {
     if (!tplJson.trim()) return null;
@@ -139,6 +138,22 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
 
   return (
     <>
+      {resetting && (
+        <SetPassword
+          user={resetting}
+          onClose={() => setResetting(null)}
+          onDone={(pw, mustChange) => {
+            const u = resetting;
+            setResetting(null);
+            run(async () => {
+              await api.resetPassword(u.id, pw, mustChange);
+              return `Password set for ${u.full_name}.`
+                + (mustChange ? ' They must change it at next sign-in.'
+                              : ' They were NOT asked to change it.');
+            }, u.id);
+          }}
+        />
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <button onClick={onBack} style={button('ghost')}>← All vendors</button>
         <strong style={{ font: `600 16px ${FONT}` }}>{vendor.name}</strong>
@@ -249,6 +264,14 @@ export default function VendorDetail({ vendor, fonts, onBack, onChanged }) {
             </Field>
             <Field label="Password" hint={PASSWORD_HINT}>
               <input style={inputStyle} type="password" value={rep.password} onChange={setR('password')} />
+            </Field>
+            <Field label="First sign-in"
+                   hint="Leave this on unless you mean for them to keep the password you just typed.">
+              <label style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 38 }}>
+                <input type="checkbox" checked={rep.must_change_password}
+                       onChange={(e) => setRep({ ...rep, must_change_password: e.target.checked })} />
+                Make them choose their own password when they first sign in
+              </label>
             </Field>
           </div>
           <button type="submit" disabled={busy || !repComplete}
