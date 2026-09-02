@@ -426,11 +426,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
   -- than NULL for the first row, because SQLite treats NULLs in a unique index
   -- as distinct and would happily accept a second chain start.
   prev_hash     TEXT NOT NULL DEFAULT 'GENESIS',
-  hash          TEXT NOT NULL,
-
-  UNIQUE (prev_hash),
-  UNIQUE (hash)
+  hash          TEXT NOT NULL DEFAULT ''
 );
+
+-- Declared as indexes rather than table constraints on purpose: a live
+-- database can be brought up to this shape with ALTER TABLE ADD COLUMN plus
+-- CREATE UNIQUE INDEX, and a table-level UNIQUE cannot be added by ALTER at
+-- all. Same enforcement, and one less reason for a deployed schema to drift
+-- from this file.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_prev_hash ON audit_log(prev_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_hash ON audit_log(hash);
 
 CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log(at DESC);
 CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(action, at DESC);

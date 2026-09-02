@@ -209,6 +209,27 @@ const run = async () => {
       const leaks = ['pw_hash', 'pw_salt'].filter((k) => dump.includes(k));
       if (leaks.length) bad(`the audit trail contains ${leaks.join(', ')}`);
       else ok('no password hashes or salts in the trail');
+
+      // Every entry must be chained, or nothing above is provable.
+      const unchained = (audit.data.entries || []).filter((e) => !e.hash || !e.prev_hash);
+      if (unchained.length) {
+        bad(`${unchained.length} entries carry no hash — the deployed schema is`
+          + ' missing prev_hash/hash and audit writes are failing silently');
+      } else if (n > 0) ok('every entry is hash-chained');
+
+      const proof = await expect('GET /api/audit/verify', '/api/audit/verify', 200);
+      if (proof.data) {
+        if (proof.data.ok) {
+          ok(`the chain verifies (${proof.data.entries} entries, anchor `
+            + `${proof.data.anchorState})`);
+        } else {
+          // Never soften this. A trail that cannot prove itself is the one
+          // finding worth waking someone up for.
+          bad(`THE AUDIT TRAIL DOES NOT VERIFY — anchor ${proof.data.anchorState}, `
+            + `${proof.data.problems?.length || 0} problems: `
+            + JSON.stringify(proof.data.problems?.slice(0, 3)));
+        }
+      }
     }
 
     head('The admin must NOT be able to issue or read a document');
