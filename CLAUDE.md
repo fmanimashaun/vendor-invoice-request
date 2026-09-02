@@ -603,11 +603,17 @@ Two traps it exists to catch, both of which have already happened here:
   `dist/`, with no warning that the source moved on. A fix was written, tested,
   "deployed", and verified as still broken in production because of this. Use
   `npm run deploy`, which is `vite build && wrangler deploy`.
-- **`routes` in `wrangler.toml` never reaches Cloudflare.** The Cloudflare Vite
-  plugin generates its own `dist/<name>/wrangler.json` and drops the key, so
-  the deploy reports only the workers.dev trigger and binds no custom domain.
-  Bind it in the dashboard instead. `grep routes dist/<name>/wrangler.json`
-  tells you which world you are in.
+- **A config edit that has not been rebuilt is not deployed either.** The same
+  trap wearing a different hat: `wrangler.toml` is compiled into
+  `dist/<name>/wrangler.json` by the build, so uncommenting `routes` and then
+  running `npx wrangler deploy` binds no custom domain and reports only the
+  workers.dev trigger. This looked convincingly like the Vite plugin dropping
+  the key, and it was diagnosed as exactly that. It is not. Rebuild, then
+  check what is about to ship:
+
+  ```bash
+  grep -E 'routes|observability' dist/<worker-name>/wrangler.json
+  ```
 
 ## Known gaps
 

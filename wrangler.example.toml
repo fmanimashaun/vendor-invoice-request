@@ -16,19 +16,17 @@ compatibility_date = "2026-01-15"
 # most recent table header, so putting this further down makes wrangler read
 # it as a field of that table and ignore it — with only a warning.
 #
-# NOTE: this key does not currently reach Cloudflare. The build runs through
-# the Cloudflare Vite plugin, which generates its own config at
-# dist/<name>/wrangler.json and drops `routes` on the way. `wrangler deploy`
-# then reports only the workers.dev trigger and the custom domain is never
-# touched — no error, no warning. Check for yourself before believing a
-# deploy bound anything:
+# Uncomment once the zone is ACTIVE in this Cloudflare account. Deploying
+# before then fails: the route cannot be provisioned without the zone.
+# `custom_domain = true` creates the DNS record and the certificate for you.
+#
+# This key DOES reach Cloudflare — but only if you rebuild. `npx wrangler
+# deploy` ships whatever is already in dist/, so an edit here that has not
+# been through `npm run build` is silently not deployed and the deploy reports
+# only the workers.dev trigger. Always `npm run deploy`. To check what is
+# actually about to ship:
 #
 #   grep routes dist/<worker-name>/wrangler.json
-#
-# So bind the custom domain in the dashboard instead: Workers & Pages -> the
-# Worker -> Settings -> Domains & Routes -> Add -> Custom domain. That creates
-# the DNS record and the certificate, and it survives deploys. Keep the block
-# below for the day the plugin passes it through, but do not rely on it.
 #
 # routes = [
 #   { pattern = "app.example.com", custom_domain = true }
@@ -79,3 +77,35 @@ id = "REPLACE_WITH_YOUR_KV_ID"
 
 # Secret, set with: npx wrangler secret put SESSION_SECRET
 # SESSION_SECRET
+
+# ── Observability ──────────────────────────────────────────────────────
+# Worker logs and traces, kept by Cloudflare and readable in the dashboard
+# under the Worker -> Logs, instead of only in a `wrangler tail` you happened
+# to have running. This app logs things you want to be able to look up after
+# the fact rather than catch live: BANK_DETAILS_CHANGED on any change to who
+# gets paid, SEQ_WATERMARK_READ_FAILED when the numbering floor cannot be
+# read, and PASSWORD_HASH_UNVERIFIABLE for an account that can never sign in.
+#
+# head_sampling_rate = 1 keeps everything. At this volume — a handful of
+# requests per invoice — sampling would only lose the one event you came
+# looking for.
+[observability]
+enabled = true
+head_sampling_rate = 1
+# Query strings are logged. Nothing secret travels in one here: the filters
+# are dates, a status and a period. Keep it that way — a token or a password
+# in a query string would land in retained logs, and never put one there.
+redact_query_string = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+# One log line per request even when the handler prints nothing, so a route
+# that 500s before reaching any console call still leaves a trace.
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1

@@ -136,26 +136,49 @@ const run = async () => {
 
   if (boot.data) {
     const b = boot.data;
-    // Each of these is something App.jsx or a tab reads without checking.
+    // The payload is flat. Assert against what the Worker actually sends —
+    // a smoke test that checks an imagined shape reports five failures on a
+    // healthy deployment and teaches you to ignore it.
     const shape = [
       ['user', b.user],
       ['user.context', b.user?.context],
       ['user.roles', b.user?.roles?.length ? b.user.roles : null],
-      ['config', b.config],
-      ['reference.businessUnits', b.reference?.businessUnits],
-      ['reference.sites', b.reference?.sites],
-      ['reference.types', b.reference?.types],
+      ['orgName', b.orgName || null],
+      ['businessUnits', b.businessUnits],
+      ['sites', b.sites],
+      ['buSites', b.buSites],
+      ['requestTypes', b.requestTypes],
+      ['feeKobo', b.feeKobo],
     ];
     for (const [name, v] of shape) {
       if (v === undefined || v === null) bad(`bootstrap is missing ${name}`);
       else ok(`bootstrap carries ${name}`);
     }
-    // An empty reference table is not a crash, but the request form has
-    // nothing to offer and the first user to open it thinks the app is broken.
-    const bus = b.reference?.businessUnits?.length ?? 0;
-    const sites = b.reference?.sites?.length ?? 0;
-    if (bus && sites) ok(`reference is populated (${bus} units, ${sites} sites)`);
-    else bad(`reference is EMPTY (${bus} units, ${sites} sites) — the request form will have nothing to pick`);
+    // Populated tables are not a correctness property, but an empty one means
+    // the request form has nothing to offer and the first person to open it
+    // concludes the app is broken.
+    const bus = b.businessUnits?.length ?? 0;
+    const sites = b.sites?.length ?? 0;
+    // buSites is a map of bu_code -> [site_code], not an array. Counting it
+    // with .length silently yields 0 and reports a healthy deployment broken.
+    const map = Object.values(b.buSites || {}).reduce((n, v) => n + (v?.length || 0), 0);
+    // Every unit needs at least one site or its cascade comes up empty.
+    const unmapped = (b.businessUnits || [])
+      .filter((u) => !(b.buSites?.[u.code] || []).length).map((u) => u.code);
+    if (unmapped.length) bad(`business units with no sites mapped: ${unmapped.join(', ')}`
+      + ' — picking one leaves the site list empty');
+    else ok('every business unit has at least one site');
+    if (bus && sites && map) ok(`reference is populated (${bus} units, ${sites} sites, ${map} mappings)`);
+    else bad(`reference is thin (${bus} units, ${sites} sites, ${map} mappings)`
+      + ' — the request form will have nothing to pick');
+    // A business unit whose numbering site is not a real site cannot produce a
+    // ref for its BU-scope requests.
+    const codes = new Set((b.sites || []).map((x) => x.code));
+    const orphans = (b.businessUnits || [])
+      .filter((u) => u.numberingSite && !codes.has(u.numberingSite))
+      .map((u) => `${u.code}->${u.numberingSite}`);
+    if (orphans.length) bad(`numbering site is not a real site: ${orphans.join(', ')}`);
+    else ok('every business unit points at a real numbering site');
   }
 
   const acting = user.context;
