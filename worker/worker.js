@@ -142,9 +142,9 @@ async function route(request, env, url) {
     // The requester form shows an INDICATIVE fee: which vendor will take the
     // request is not known yet, and the fee is the vendor's. The figure that
     // is actually billed is copied onto the invoice at approval.
-    const vendorCfg = me.vendor_id
-      ? await env.DB.prepare('SELECT * FROM vendor_config WHERE vendor_id = ?1').bind(me.vendor_id).first()
-      : null;
+    //
+    // A vendor is not sent their own config: they have no screen for it and
+    // nobody able to change it. The client admin maintains it.
     // The form may only offer active rows; the admin page asks for the full
     // set separately so it can show and restore disabled ones.
     const ref = activeOnly(await loadReference(env));
@@ -159,7 +159,6 @@ async function route(request, env, url) {
       passwordHint: PASSWORD_HINT,
       feeKobo: cfg?.default_fee_kobo ?? 10000,
       feeIsIndicative: true,
-      config: vendorCfg || undefined,
     });
   }
 
@@ -178,7 +177,9 @@ async function route(request, env, url) {
   if ((m = path.match(/^\/api\/invoices\/(.+)\/pdf$/)) && method === 'GET')
     return invoicePdf(env, me, decodeURIComponent(m[1]));
 
-  if (path === '/api/config' && method === 'PUT') return updateConfig(request, env, me);
+  if ((m = path.match(/^\/api\/vendors\/(\d+)\/config$/)) && method === 'PUT')
+    return updateVendorConfig(request, env, me, Number(m[1]));
+  if (path === '/api/summary' && method === 'GET')   return summary(env, me, url);
   if (path === '/api/reference' && method === 'GET')  return adminReference(env, me);
   if (path === '/api/sites' && method === 'POST')     return upsertSite(request, env, me);
   if ((m = path.match(/^\/api\/sites\/([A-Z0-9]+)$/)) && method === 'PUT')
@@ -264,7 +265,11 @@ const requireRole = (me, ...roles) => {
 };
 
 const CLIENT_ROLES = ['member', 'admin'];
-const VENDOR_ROLES = ['approver', 'admin'];
+// Vendors have representatives who approve requests and issue invoices, and
+// nothing else. There is exactly ONE administrator in the system and it is the
+// client's: they onboard vendors, add vendor reps, and maintain every vendor's
+// payment and tax details. A vendor has nobody to log in and configure.
+const VENDOR_ROLES = ['approver'];
 
 // ── Auth ──────────────────────────────────────────────────────────────
 
@@ -571,6 +576,96 @@ function parseTax(b) {
     return { error: "vat_basis must be 'invoice' or 'fee'." };
   }
   return { tin: String(b.tin || '').trim() || null, vat, wht, basis };
+}
+
+/**
+ * What has actually been issued: totals over a date range, broken down.
+ *
+ * Reads `invoices`, never `requests`. A request is an intention; an invoice is
+ * a document that exists and is defensible to a tax authority, and those are
+ * the only numbers worth reporting. Amounts come off the invoice row too, not
+ * the request, because the request's figures were indicative before a vendor
+ * took it.
+ *
+ * Client admins only. A vendor sees its own history on its own screen and has
+ * no business seeing what its competitors issued.
+ */
+async function summary(env, me, url) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  // Default to the current year rather than all time: "how much this year" is
+  // the question a tax filing actually asks.
+  const now = new Date();
+  const from = String(url?.searchParams?.get('from') || `${now.getUTCFullYear()}-01-01`);
+  const to = String(url?.searchParams?.get('to') || `${now.getUTCFullYear()}-12-31`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    return fail('bad_request', 'from and to must be YYYY-MM-DD.');
+  }
+  // issued_at is 'YYYY-MM-DD HH:MM:SS'; compare on the date part so `to` is
+  // inclusive of its whole day.
+  const range = ['date(i.issued_at) BETWEEN ?1 AND ?2', from, to];
+
+  const one = async (sql, ...binds) =>
+    (await env.DB.prepare(sql).bind(...binds).all()).results || [];
+
+  const [totals] = await one(
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(i.amount_kobo), 0) AS amount_kobo,
+            COALESCE(SUM(i.fee_kobo), 0)    AS fee_kobo,
+            COALESCE(SUM(i.vat_kobo), 0)    AS vat_kobo,
+            COALESCE(SUM(i.wht_kobo), 0)    AS wht_kobo,
+            COALESCE(SUM(i.total_kobo), 0)  AS total_kobo
+       FROM invoices i WHERE ${range[0]}`, from, to);
+
+  const byType = await one(
+    `SELECT r.type_code AS key, COUNT(*) AS count,
+            COALESCE(SUM(i.total_kobo), 0) AS total_kobo
+       FROM invoices i JOIN requests r ON r.id = i.request_id
+      WHERE ${range[0]} GROUP BY r.type_code ORDER BY total_kobo DESC`, from, to);
+
+  const byVendor = await one(
+    `SELECT v.name AS key, v.code, COUNT(*) AS count,
+            COALESCE(SUM(i.total_kobo), 0) AS total_kobo
+       FROM invoices i JOIN vendors v ON v.id = i.vendor_id
+      WHERE ${range[0]} GROUP BY v.id ORDER BY total_kobo DESC`, from, to);
+
+  const byBu = await one(
+    `SELECT i.bu_code AS key, COUNT(*) AS count,
+            COALESCE(SUM(i.total_kobo), 0) AS total_kobo
+       FROM invoices i WHERE ${range[0]} GROUP BY i.bu_code ORDER BY total_kobo DESC`, from, to);
+
+  const bySite = await one(
+    `SELECT i.site_code AS key, COUNT(*) AS count,
+            COALESCE(SUM(i.total_kobo), 0) AS total_kobo
+       FROM invoices i WHERE ${range[0]} GROUP BY i.site_code ORDER BY total_kobo DESC LIMIT 20`,
+    from, to);
+
+  const byMonth = await one(
+    `SELECT i.period AS key, COUNT(*) AS count,
+            COALESCE(SUM(i.total_kobo), 0) AS total_kobo
+       FROM invoices i WHERE ${range[0]} GROUP BY i.period ORDER BY i.period`, from, to);
+
+  // Requests that never became a document, so the queue is visible next to
+  // the totals rather than on a different screen.
+  const [pending] = await one(
+    `SELECT COUNT(*) AS count, COALESCE(SUM(amount_kobo), 0) AS amount_kobo
+       FROM requests WHERE status = 'pending'`);
+
+  const ref = await loadReference(env);
+  const label = (rows, fn) => rows.map((r) => ({ ...r, label: fn(r) }));
+
+  return json({
+    from,
+    to,
+    totals,
+    pending,
+    byType: label(byType, (r) => typeFor(r.key)?.label ?? r.key),
+    byVendor,
+    byBu: label(byBu, (r) => buNameIn(ref, r.key)),
+    bySite: label(bySite, (r) => siteNameIn(ref, r.key)),
+    byMonth: label(byMonth, (r) => periodLabel(r.key)),
+  });
 }
 
 async function adminReference(env, me) {
@@ -997,7 +1092,9 @@ async function listVendors(env, me) {
   const denied = requireRosterAdmin(me);
   if (denied) return denied;
   const { results } = await env.DB.prepare(
-    `SELECT v.*, c.fee_kobo,
+    `SELECT v.*, c.fee_kobo, c.bank_account_name, c.bank_account_number,
+            c.bank_name, c.signatory_name, c.signatory_title,
+            c.tin, c.vat_rate_bps, c.wht_rate_bps, c.vat_basis,
             (SELECT COUNT(*) FROM users u
               WHERE u.vendor_id = v.id AND u.status = 'active') AS staff_count,
             (SELECT COUNT(*) FROM invoices i WHERE i.vendor_id = v.id) AS invoice_count
@@ -1175,11 +1272,11 @@ async function previewVendorTemplate(request, env, me, id) {
 }
 
 async function getVendorTemplate(env, me, id) {
-  const mine = me.org === 'vendor' && me.vendor_id === id && hasRole(me, 'admin');
-  if (!mine) {
-    const denied = requireRosterAdmin(me);
-    if (denied) return denied;
-  }
+  // Client admin only. Vendors have no administrator to review a layout, and
+  // the reps who approve requests have no reason to see one.
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
   const v = await env.DB.prepare('SELECT template_json FROM vendors WHERE id = ?1').bind(id).first();
   if (!v) return fail('not_found', 'No such vendor.', 404);
   let tpl = null;
@@ -1228,6 +1325,10 @@ async function putVendorTemplate(request, env, me, id) {
 
 const publicVendor = (v) => ({
   id: v.id, code: v.code, name: v.name, status: v.status,
+  bank_account_name: v.bank_account_name, bank_account_number: v.bank_account_number,
+  bank_name: v.bank_name, signatory_name: v.signatory_name,
+  signatory_title: v.signatory_title, tin: v.tin,
+  vat_rate_bps: v.vat_rate_bps, wht_rate_bps: v.wht_rate_bps, vat_basis: v.vat_basis,
   contact_lines: JSON.parse(v.contact_lines || '[]'),
   has_template: !!v.template_json,
   fee_kobo: v.fee_kobo,
@@ -1716,7 +1817,7 @@ async function withdrawRequest(env, me, id) {
 }
 
 async function rejectRequest(request, env, me, id) {
-  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver', 'admin');
+  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver');
   if (denied) return denied;
 
   const { reason } = await request.json().catch(() => ({}));
@@ -1740,7 +1841,7 @@ async function rejectRequest(request, env, me, id) {
 async function approveRequest(env, me, id) {
   // Only a vendor may approve. This is what makes the issued document the
   // vendor's own, rather than client self-issuing on someone's letterhead.
-  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver', 'admin');
+  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver');
   if (denied) return denied;
 
   const vendor = await env.DB.prepare(
@@ -1971,12 +2072,24 @@ async function loadAssets(env, vendorCode, contactLinesJson, artwork, family = '
 
 // ── Config ────────────────────────────────────────────────────────────
 
-async function updateConfig(request, env, me) {
-  // Bank details decide where money is transferred. A vendor admin edits only
-  // their OWN row -- the client admin cannot, which keeps whose account gets
-  // paid a decision of the party being paid.
-  const denied = requireOrg(me, 'vendor') || requireRole(me, 'admin');
+/**
+ * A vendor's bank, signatory and tax details, maintained by the client admin.
+ *
+ * Bank details decide where money lands, so this is the highest-risk mutable
+ * field in the system and it now sits inside the client's own blast radius: a
+ * compromised admin session could redirect a vendor's payments, and the
+ * invoice would look perfectly legitimate because the details are copied at
+ * issue. That is a deliberate trade for having one administrator rather than
+ * two, and `BANK_DETAILS_CHANGED` exists precisely so the change is visible
+ * afterwards. Wire that log to a real notification before go-live.
+ */
+async function updateVendorConfig(request, env, me, vendorId) {
+  const denied = requireRosterAdmin(me);
   if (denied) return denied;
+
+  const vendor = await env.DB.prepare('SELECT * FROM vendors WHERE id = ?1')
+    .bind(vendorId).first();
+  if (!vendor) return fail('not_found', 'No such vendor.', 404);
 
   const b = await request.json().catch(() => ({}));
   const fields = ['bank_account_name', 'bank_account_number', 'bank_name', 'signatory_name', 'signatory_title'];
@@ -1991,7 +2104,7 @@ async function updateConfig(request, env, me) {
 
   const before = await env.DB.prepare(
     'SELECT * FROM vendor_config WHERE vendor_id = ?1',
-  ).bind(me.vendor_id).first();
+  ).bind(vendorId).first();
 
   await env.DB.prepare(
     `UPDATE vendor_config SET bank_account_name=?1, bank_account_number=?2, bank_name=?3,
@@ -2002,7 +2115,7 @@ async function updateConfig(request, env, me) {
   ).bind(
     b.bank_account_name.trim(), b.bank_account_number.trim(), b.bank_name.trim(),
     fee, b.signatory_name.trim(), b.signatory_title.trim(),
-    tax.tin, tax.vat, tax.wht, tax.basis, me.email, me.vendor_id,
+    tax.tin, tax.vat, tax.wht, tax.basis, me.email, vendorId,
   ).run();
 
   // Already-issued invoices keep their own copy of these values, so this
@@ -2014,6 +2127,7 @@ async function updateConfig(request, env, me) {
 
   if (bankChanged) {
     console.warn('BANK_DETAILS_CHANGED', JSON.stringify({
+      vendor: vendor.code,
       by: me.email, at: new Date().toISOString(),
       from: { name: before.bank_account_name, number: before.bank_account_number, bank: before.bank_name },
       to:   { name: b.bank_account_name, number: b.bank_account_number, bank: b.bank_name },
@@ -2022,6 +2136,6 @@ async function updateConfig(request, env, me) {
 
   const after = await env.DB.prepare(
     'SELECT * FROM vendor_config WHERE vendor_id = ?1',
-  ).bind(me.vendor_id).first();
+  ).bind(vendorId).first();
   return json({ config: after, bankChanged: !!bankChanged });
 }

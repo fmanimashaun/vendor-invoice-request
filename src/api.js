@@ -74,7 +74,9 @@ export const api = {
   linkBuSite:  (bu, site, on)   => call('/bu-sites', { method: 'POST', body: { bu_code: bu, site_code: site, attached: on } }),
   savePlatformConfig: (c)       => call('/platform-config', { method: 'PUT', body: c }),
 
+  summary:     (from, to)       => call(`/summary?from=${from}&to=${to}`),
   vendors:     ()               => call('/vendors'),
+  saveVendorConfig: (id, cfg)   => call(`/vendors/${id}/config`, { method: 'PUT', body: cfg }),
   createVendor: (v)             => call('/vendors', { method: 'POST', body: v }),
   setVendorStatus: (id, status) => call(`/vendors/${id}/status`, { method: 'POST', body: { status } }),
 

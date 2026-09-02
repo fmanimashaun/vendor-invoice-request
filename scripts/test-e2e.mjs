@@ -133,7 +133,7 @@ DB.db.prepare(
   `INSERT INTO users (email, full_name, org, vendor_id, roles, job_title, phone,
                       pw_hash, pw_salt, pw_iterations)
    VALUES (?,?,?,?,?,?,?,?,?,?)`,
-).run('admin@alpha.example', 'Alpha Admin', 'vendor', 1, 'admin',
+).run('admin@alpha.example', 'Alpha Admin', 'vendor', 1, 'approver',
       'Operations Director', '+234 803 555 0199', pw2.hash, pw2.salt, pw2.iterations);
 
 // A rival vendor's approver: sees the same queue, none of the other vendor's history.
@@ -213,7 +213,10 @@ check('client bootstrap succeeds', r.status === 200 && r.data.user.org === 'clie
 check('client does not receive bank details', r.data.config === undefined);
 
 r = await call('victor', '/api/bootstrap');
-check('the vendor receives bank details', !!r.data.config?.bank_account_number);
+// A vendor is not sent their own configuration: they have no screen for it
+// and nobody who could change it. The client admin maintains it.
+check('a vendor is NOT sent its own bank details', r.data.config === undefined,
+  JSON.stringify(r.data.config));
 
 results.push('\nRole separation');
 
@@ -524,7 +527,8 @@ results.push('\nSelf-approval');
 // Make a vendor admin who is also the creator, to prove the guard.
 DB.db.prepare('UPDATE requests SET created_by = (SELECT id FROM users WHERE email=?) WHERE id = ?')
   .run('approver@alpha.example', ajaId);
-const selfReq = DB.db.prepare(`SELECT id FROM requests WHERE status='pending' LIMIT 1`).get();
+const selfReq = DB.db.prepare(
+  `SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1`).get();
 DB.db.prepare('UPDATE requests SET created_by = (SELECT id FROM users WHERE email=?) WHERE id = ?')
   .run('approver@alpha.example', selfReq.id);
 r = await call('victor', `/api/requests/${selfReq.id}/approve`, { method: 'POST' });
@@ -595,7 +599,10 @@ check('the issuing vendor still sees its own approved work',
   (bsList.data?.requests || []).some((x) => x.status === 'approved'));
 
 // Whoever approves first takes it out of everyone else's queue.
-const openReq = DB.db.prepare("SELECT id FROM requests WHERE status='pending' LIMIT 1").get();
+// Ordered explicitly: without it SQLite may return any pending row, and which
+// one gets approved changes the approved history other assertions depend on.
+const openReq = DB.db.prepare(
+  "SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1").get();
 r = await call('rival', `/api/requests/${openReq.id}/approve`, { method: 'POST' });
 check('a rival vendor can approve from the shared queue', r.status === 201, JSON.stringify(r.data));
 
@@ -621,7 +628,8 @@ check('the taken request has left the other vendor\'s queue',
 
 // A suspended vendor keeps its documents but loses the queue.
 DB.db.prepare("UPDATE vendors SET status='disabled' WHERE id=2").run();
-const stillPending = DB.db.prepare("SELECT id FROM requests WHERE status='pending' LIMIT 1").get();
+const stillPending = DB.db.prepare(
+  "SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1").get();
 if (stillPending) {
   r = await call('rival', `/api/requests/${stillPending.id}/approve`, { method: 'POST' });
   check('a suspended vendor cannot approve', r.status === 403, JSON.stringify(r.data));
@@ -906,10 +914,12 @@ check('and the PDF still renders without it', r.status === 200 && r.data?.length
 await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { template: null } });
 
 // Only the client admin writes; the owning vendor's admin may read.
+// There is one administrator and it is the client's. A vendor rep has no
+// reason to see a layout and nobody at the vendor can change one.
 r = await call('admin', '/api/vendors/1/template');
-check('the owning vendor admin may read their own template', r.status === 200, `status=${r.status}`);
+check('a vendor rep may not read a template', r.status === 403, `status=${r.status}`);
 r = await call('admin', '/api/vendors/1/template', { method: 'PUT', body: { template: partial } });
-check('but may not write it', r.status === 403, `status=${r.status}`);
+check('nor write one', r.status === 403, `status=${r.status}`);
 r = await call('rival', '/api/vendors/1/template');
 check('another vendor may not read it', r.status === 403, `status=${r.status}`);
 
@@ -1137,6 +1147,39 @@ r = await call('anon', '/api/auth/login', { method: 'POST', body: {
   email: 'phrase@client.example', password: 'a brand new passphrase here' } });
 check('the new password signs in', r.status === 200, JSON.stringify(r.data));
 
+results.push('\nDashboard summary');
+
+r = await call('reladmin', '/api/summary?from=2020-01-01&to=2030-12-31');
+check('the admin gets a summary', r.status === 200, JSON.stringify(r.data)?.slice(0, 120));
+check('it counts issued invoices, not requests',
+  r.data?.totals?.count === DB.db.prepare('SELECT COUNT(*) c FROM invoices').get().c,
+  `${r.data?.totals?.count} vs ${DB.db.prepare('SELECT COUNT(*) c FROM invoices').get().c}`);
+check('the total matches the invoice rows',
+  r.data?.totals?.total_kobo
+    === DB.db.prepare('SELECT COALESCE(SUM(total_kobo),0) t FROM invoices').get().t,
+  String(r.data?.totals?.total_kobo));
+check('it breaks down by category', (r.data?.byType || []).length > 0
+  && r.data.byType.every((x) => x.label), JSON.stringify(r.data?.byType));
+check('and by vendor', (r.data?.byVendor || []).length > 0, JSON.stringify(r.data?.byVendor));
+check('and by business unit', (r.data?.byBu || []).every((x) => x.label),
+  JSON.stringify(r.data?.byBu));
+check('pending requests are surfaced alongside',
+  typeof r.data?.pending?.count === 'number', JSON.stringify(r.data?.pending));
+
+// The range is the point: a tax question is always "how much in this period".
+r = await call('reladmin', '/api/summary?from=1990-01-01&to=1990-12-31');
+check('a range with nothing in it returns zeroes, not an error',
+  r.status === 200 && r.data?.totals?.count === 0 && r.data?.totals?.total_kobo === 0,
+  JSON.stringify(r.data?.totals));
+
+r = await call('reladmin', '/api/summary?from=nonsense&to=2030-12-31');
+check('a malformed date is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await call('victor', '/api/summary');
+check('a vendor cannot see what everyone issued', r.status === 403, `status=${r.status}`);
+r = await call('rel', '/api/summary');
+check('nor can an ordinary member', r.status === 403, `status=${r.status}`);
+
 results.push('\nVendor onboarding');
 
 r = await call('reladmin', '/api/vendors');
@@ -1172,19 +1215,26 @@ check('client admin suspends a vendor', r.status === 200, JSON.stringify(r.data)
 
 results.push('\nVendor config is per vendor');
 
-r = await call('admin', '/api/config', { method: 'PUT', body: {
+r = await call('reladmin', '/api/vendors/1/config', { method: 'PUT', body: {
   bank_account_name: 'Alpha Renamed', bank_account_number: '0123456789',
   bank_name: 'Example Bank', fee_kobo: 12000,
   signatory_name: 'An Approver', signatory_title: 'BDM',
 } });
-check('a vendor admin edits their own config', r.status === 200, JSON.stringify(r.data));
-check('the edit did not touch the other vendor',
+check('the client admin maintains a vendor config', r.status === 200, JSON.stringify(r.data));
+check('and it is scoped to that vendor alone',
   DB.db.prepare('SELECT fee_kobo FROM vendor_config WHERE vendor_id = 2').get().fee_kobo === 25000);
-r = await call('reladmin', '/api/config', { method: 'PUT', body: {
+
+r = await call('victor', '/api/vendors/1/config', { method: 'PUT', body: {
   bank_account_name: 'X', bank_account_number: '1', bank_name: 'B', fee_kobo: 1,
   signatory_name: 'S', signatory_title: 'T',
 } });
-check('the client admin cannot edit a vendor\'s bank details', r.status === 403, `status=${r.status}`);
+check('a vendor rep cannot change their own bank details', r.status === 403, `status=${r.status}`);
+
+r = await call('reladmin', '/api/vendors/999/config', { method: 'PUT', body: {
+  bank_account_name: 'X', bank_account_number: '1', bank_name: 'B', fee_kobo: 1,
+  signatory_name: 'S', signatory_title: 'T',
+} });
+check('a config for a vendor that does not exist is refused', r.status === 404, `status=${r.status}`);
 
 results.push('\nVendor roster');
 
@@ -1261,7 +1311,10 @@ check('client admin may read the request table', r.status === 200, `status=${r.s
 // using both at once — the session acts in one context at a time.
 const raiseBody = {
   bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733',
-  period: '2026-10', amount_kobo: 100000, description: 'Raised by an admin who is also a member',
+  // Close to what this site already bills, so this assertion tests the role
+  // context and nothing else. A wildly different figure would trip the
+  // amount-variance warning and fail for an unrelated reason.
+  period: '2026-10', amount_kobo: 4900000, description: 'Raised by an admin who is also a member',
 };
 
 r = await call('reladmin', '/api/requests', { method: 'POST', body: raiseBody });
@@ -1339,6 +1392,12 @@ r = await call('reladmin', '/api/users', { method: 'POST', body: {
   roles: ['approver'], password: 'a-long-enough-password' } });
 check('a vendor role cannot be given to client staff', r.status === 400, JSON.stringify(r.data));
 
+// One administrator, and it is the client's. A vendor has representatives.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'vendor', vendor_id: 1, email: 'vadmin@alpha.example', full_name: 'Vendor Admin',
+  roles: ['admin'], job_title: 'X', phone: 'Y', password: 'a-long-enough-password' } });
+check('a vendor cannot be given an admin', r.status === 400, JSON.stringify(r.data));
+
 results.push('\nSSO provisioning');
 
 let sso = await resolveOrProvisionSsoUser(env, { email: 'Brand.New@client.example', name: 'Brand New' });
@@ -1395,15 +1454,15 @@ check('a token with no email is refused', sso.denied === 'no_email', JSON.string
 
 results.push('\nConfig');
 
-r = await call('victor', '/api/config', {
+r = await call('victor', '/api/vendors/1/config', {
   method: 'PUT',
   body: { bank_account_name: 'X', bank_account_number: '1', bank_name: 'Y', fee_kobo: 10000, signatory_name: 'A', signatory_title: 'B' },
 });
-check('approver cannot change bank details', r.status === 403, `got ${r.status}`);
+check('an approver cannot change bank details', r.status === 403, `got ${r.status}`);
 
 const beforeInvoice = DB.db.prepare('SELECT bank_account_number FROM invoices WHERE invoice_no = ?').get(routerInvoice);
 
-r = await call('admin', '/api/config', {
+r = await call('reladmin', '/api/vendors/1/config', {
   method: 'PUT',
   body: {
     bank_account_name: 'Alpha Services Ltd', bank_account_number: '9999999999',
@@ -1411,8 +1470,10 @@ r = await call('admin', '/api/config', {
     signatory_name: 'An Approver', signatory_title: 'Business Development Manager',
   },
 });
-check('admin can change bank details', r.status === 200, JSON.stringify(r.data));
-check('bank change is flagged', r.data?.bankChanged === true);
+check('the client admin can change bank details', r.status === 200, JSON.stringify(r.data));
+// Where money lands is the highest-risk mutable field in the system and it now
+// sits inside the client's own blast radius, so the change must be visible.
+check('the change is flagged for notification', r.data?.bankChanged === true);
 
 const afterInvoice = DB.db.prepare('SELECT bank_account_number FROM invoices WHERE invoice_no = ?').get(routerInvoice);
 check('already-issued invoice keeps its original account number',

@@ -392,6 +392,22 @@ account over.
   The Access policy is therefore the real gate on who can raise a request; set
   `SSO_ALLOWED_DOMAINS` as defence in depth if that policy is ever widened. A
   disabled account is refused, not resurrected.
+- **One administrator, and it is the client's.** Vendors have representatives
+  who approve requests and issue invoices, and nobody who configures anything:
+  `VENDOR_ROLES` is `['approver']`. The client admin onboards vendors, adds
+  their reps, and maintains their bank, signatory and tax details.
+
+  The trade this makes is real and worth stating: where money lands is the
+  highest-risk mutable field in the system, and it now sits inside the client's
+  own blast radius. A compromised admin session could redirect a vendor's
+  payments and the invoice would look legitimate, because the details are
+  copied at issue. `BANK_DETAILS_CHANGED` exists so the change is visible
+  afterwards — wire it to a real notification before go-live.
+
+- **The client admin cannot approve, reject, or download an invoice.**
+  Those routes require `org = 'vendor'`. The document is worth nothing as audit
+  evidence if the payer can produce it themselves.
+
 - **The client admin owns the vendor list and every vendor roster.**
   `/api/vendors*` and `/api/users*` require `org = 'client'` **and**
   `role = 'admin'`; a vendor cannot add its own accounts. A vendor admin can

@@ -4,8 +4,9 @@ import { Card, Field, Banner, button } from './components/Shell.jsx';
 import RequestForm from './components/RequestForm.jsx';
 import Queue from './components/Queue.jsx';
 import History from './components/History.jsx';
-import Config from './components/Config.jsx';
 import Vendors from './components/Vendors.jsx';
+import Users from './components/Users.jsx';
+import Dashboard from './components/Dashboard.jsx';
 import Locations from './components/Locations.jsx';
 import { api, ApiError } from './api.js';
 
@@ -43,7 +44,7 @@ function writeContext(user, role) {
 /** Landing tab for a given context. */
 const firstTab = (user, context) =>
   user.org === 'vendor' ? 'queue'
-  : context === 'admin' ? 'history'
+  : context === 'admin' ? 'dashboard'
   : 'new';
 
 export default function App() {
@@ -133,10 +134,15 @@ export default function App() {
     ? [
         ['queue',   pendingCount ? `Open queue (${pendingCount})` : 'Open queue'],
         ['history', 'Approved by us'],
-        ...(acting === 'admin' ? [['config', 'Settings']] : []),
       ]
     : clientAdmin
-      ? [['history', 'Requests'], ['vendors', 'Vendors & users'], ['locations', 'Settings']]
+      ? [
+          ['dashboard', 'Dashboard'],
+          ['history',   'Requests'],
+          ['vendors',   'Vendors'],
+          ['users',     'Staff'],
+          ['locations', 'Settings'],
+        ]
       : [['new', 'New request'], ['history', 'My requests']];
 
   return (
@@ -218,7 +224,9 @@ export default function App() {
         {tab === 'history' && (
           <History requests={requests} me={user} acting={acting} onChanged={refresh} />
         )}
+        {tab === 'dashboard' && <Dashboard />}
         {tab === 'vendors' && <Vendors />}
+        {tab === 'users' && <Users />}
         {tab === 'locations' && (
           <Locations
             feeKobo={boot.feeKobo}
@@ -226,12 +234,6 @@ export default function App() {
             onSaved={(cfg) => setBoot({
               ...boot, feeKobo: cfg.default_fee_kobo, orgName: cfg.org_name,
             })}
-          />
-        )}
-        {tab === 'config' && (
-          <Config
-            config={boot.config}
-            onSaved={(cfg) => setBoot({ ...boot, config: cfg, feeKobo: cfg.fee_kobo })}
           />
         )}
       </main>

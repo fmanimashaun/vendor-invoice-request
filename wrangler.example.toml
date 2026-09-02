@@ -34,7 +34,7 @@ id = "REPLACE_WITH_YOUR_KV_ID"
 # certificate for you. There is nothing to add by hand.
 #
 # routes = [
-#   { pattern = "vendor-invoice-request.com.ng", custom_domain = true }
+#   { pattern = "app.vendor-invoice-request.com.ng", custom_domain = true }
 # ]
 #
 # Once it resolves, turn the workers.dev URL off so the app has exactly one
