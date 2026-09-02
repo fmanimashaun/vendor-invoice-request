@@ -3,6 +3,7 @@ import { T, FONT, input as inputStyle } from '../theme.js';
 import { Card, Field, Table, Td, Banner, button , SubTabs } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import Audit from './Audit.jsx';
+import Branding from './Branding.jsx';
 import { naira } from '../../shared/reference.js';
 
 const BLANK_SITE = { code: '', name: '', bu_code: '' };
@@ -20,7 +21,7 @@ const BLANK_BU = { code: '', name: '', numbering_site: '' };
  * just labels, and one added without its duplicate-guard index would have no
  * duplicate protection at all.
  */
-export default function Locations({ feeKobo, orgName, onSaved }) {
+export default function Locations({ feeKobo, orgName, logo, favicon, onSaved }) {
   const [sub, setSub]       = useState('locations');
   const [ref, setRef]       = useState(null);
   const [site, setSite]     = useState(BLANK_SITE);
@@ -325,6 +326,7 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
       </Card>
     </>,
     organisation: <>
+      <Branding orgName={orgName} logo={logo} favicon={favicon} onSaved={onSaved} />
       <Card title="Organisation">
         <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
           Your organisation's name, as shown in the header and printed as the

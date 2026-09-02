@@ -15,7 +15,7 @@ import {
   authenticate, resolveContext, hashPassword, verifyPassword, verifyAccessJwt,
   signSession, sessionCookie,
 } from './auth.js';
-import { renderInvoice } from './renderInvoice.js';
+import { renderInvoice, RENDERER_VERSION } from './renderInvoice.js';
 import { mergeTemplate, validateTemplate, DEFAULT_TEMPLATE } from '../shared/template.js';
 import { FONT_CATALOGUE, fontKeys, REQUIRED_GLYPHS, FALLBACK_FONT } from '../shared/fonts.js';
 import { checkPassword, PASSWORD_HINT } from '../shared/password.js';
@@ -193,6 +193,8 @@ async function route(request, env, url) {
       buSites: ref.buSites,
       requestTypes: REQUEST_TYPES,
       orgName: cfg?.org_name || '',
+      logo: cfg?.logo_data_uri || null,
+      favicon: cfg?.favicon_data_uri || null,
       mustChangePassword: !!me.must_change_password,
       passwordHint: PASSWORD_HINT,
       feeKobo: cfg?.default_fee_kobo ?? 10000,
@@ -866,6 +868,36 @@ async function updatePlatformConfig(request, env, me) {
     return fail('bad_request', 'org_name cannot be blank.');
   }
 
+  // Branding. Sent as a data: URI, or an empty string to clear it.
+  //
+  // Validated for shape and size rather than trusted: this string is rendered
+  // into an <img> and a <link rel=icon> for every user, so an svg+xml payload
+  // would be a script-execution vector on the admin's own console. Raster and
+  // vector-free types only.
+  const BRAND_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif',
+                       'image/x-icon', 'image/vnd.microsoft.icon'];
+  const MAX_BRAND_BYTES = 256 * 1024;
+  const brand = {};
+  for (const key of ['logo_data_uri', 'favicon_data_uri']) {
+    if (b[key] === undefined) { brand[key] = null; continue; }
+    const v = String(b[key] || '').trim();
+    if (!v) { brand[key] = ''; continue; }
+    const m = /^data:([a-z/.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(v);
+    if (!m) {
+      return fail('bad_request', `${key} must be a base64 data: URI.`);
+    }
+    if (!BRAND_TYPES.includes(m[1])) {
+      return fail('bad_request',
+        `${key}: ${m[1]} is not allowed. Use PNG, JPEG, WebP, GIF or ICO — `
+        + 'SVG can carry script and this is rendered on every page.');
+    }
+    // base64 is 4 characters per 3 bytes.
+    if (Math.floor(m[2].length * 3 / 4) > MAX_BRAND_BYTES) {
+      return fail('bad_request', `${key} is larger than 256 KB.`);
+    }
+    brand[key] = v;
+  }
+
   // A floor may only ever rise. Lowering it would let the system re-issue a
   // number it has already used, which is the exact thing it exists to prevent.
   let floor = null;
@@ -885,10 +917,26 @@ async function updatePlatformConfig(request, env, me) {
     `UPDATE config SET default_fee_kobo = ?1,
             org_name = COALESCE(?3, org_name),
             seq_floor = COALESCE(?4, seq_floor),
+            -- NULLIF lets '' clear the field while an absent key leaves it be:
+            -- COALESCE alone could not tell "not sent" from "remove this".
+            logo_data_uri = CASE WHEN ?5 IS NULL THEN logo_data_uri ELSE NULLIF(?5,'') END,
+            favicon_data_uri = CASE WHEN ?6 IS NULL THEN favicon_data_uri ELSE NULLIF(?6,'') END,
             updated_at = datetime('now'), updated_by = ?2
       WHERE id = 1`,
-  ).bind(fee, me.email, orgName, floor).run();
+  ).bind(fee, me.email, orgName, floor,
+         brand.logo_data_uri, brand.favicon_data_uri).run();
   const row = await env.DB.prepare('SELECT * FROM config WHERE id = 1').first();
+  if (brand.logo_data_uri !== null || brand.favicon_data_uri !== null) {
+    await audit(env, me, 'BRANDING_CHANGED', {
+      entity: 'config:1',
+      // The images themselves are not recorded — a 256 KB data: URI in an
+      // append-only table, twice per change, for no investigative value.
+      summary: [
+        brand.logo_data_uri !== null && (brand.logo_data_uri ? 'logo set' : 'logo cleared'),
+        brand.favicon_data_uri !== null && (brand.favicon_data_uri ? 'favicon set' : 'favicon cleared'),
+      ].filter(Boolean).join(', '),
+    });
+  }
   return json({ config: row });
 }
 
@@ -2086,6 +2134,11 @@ async function approveRequest(env, me, id) {
     'SELECT org_name, seq_floor, instance_epoch FROM config WHERE id = 1').first();
   const cfgFloor = Number(platform?.seq_floor) || 0;
 
+  // Resolved here, once, from the vendor's layout as it stands at this moment.
+  let vendorTpl = null;
+  try { vendorTpl = vendor.template_json ? JSON.parse(vendor.template_json) : null; } catch { /* default */ }
+  const issuedTemplate = JSON.stringify(mergeTemplate(vendorTpl));
+
   // Claim this deployment's stamp the first time it issues anything. Written
   // once and never again: every number this system produces carries it, so
   // changing it later would orphan everything already issued.
@@ -2138,8 +2191,9 @@ async function approveRequest(env, me, id) {
               signatory_name, signatory_title, issued_by,
               approver_name, approver_title, approver_phone, approver_email,
               vendor_id, amount_kobo, fee_kobo, total_kobo,
-              vat_kobo, wht_kobo, tin, client_name)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)`,
+              vat_kobo, wht_kobo, tin, client_name,
+              template_json, renderer_version)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)`,
         ).bind(
           invoice_no, req.id, req.bu_code, site, req.period, seq,
           cfg.bank_account_name, cfg.bank_account_number, cfg.bank_name,
@@ -2148,6 +2202,12 @@ async function approveRequest(env, me, id) {
           me.full_name, me.job_title, me.phone, me.email,
           me.vendor_id, req.amount_kobo, feeKobo, totalKobo,
           vatKobo, whtKobo, cfg.tin, platform?.org_name || null,
+          // The layout, frozen. Same reason as the signature block above: the
+          // route that regenerates this used to join the vendor's CURRENT
+          // template, so editing a layout rewrote documents already issued.
+          // Merged rather than stored as overrides, so a later change to
+          // DEFAULT_TEMPLATE cannot move an old document either.
+          issuedTemplate, RENDERER_VERSION,
         ),
         env.DB.prepare(
           `UPDATE requests
@@ -2218,7 +2278,7 @@ async function invoicePdf(env, me, invoiceNo) {
   const row = await env.DB.prepare(
     `SELECT i.*, r.addressee, r.addressee_loc, r.subject, r.narrative, r.description,
             r.type_code, r.asset_key, v.code AS vendor_code, v.name AS vendor_name,
-            v.template_json
+            v.template_json, i.template_json AS issued_template_json
        FROM invoices i
        JOIN requests r ON r.id = i.request_id
        JOIN vendors v ON v.id = i.vendor_id
@@ -2230,9 +2290,13 @@ async function invoicePdf(env, me, invoiceNo) {
   if (row.vendor_id !== me.vendor_id) return fail('not_found', 'No such invoice.', 404);
 
   const type = typeFor(row.type_code);
-  // The vendor's own layout. A row with no template renders the default.
+  // The layout this invoice was ISSUED with, not the vendor's current one.
+  // Falling back to the vendor's template covers invoices issued before the
+  // snapshot existed; there is nothing better available for those.
   let tpl = null;
-  try { tpl = row.template_json ? JSON.parse(row.template_json) : null; } catch { tpl = null; }
+  try {
+    tpl = JSON.parse(row.issued_template_json || row.template_json || 'null');
+  } catch { tpl = null; }
   const merged = mergeTemplate(tpl);
   const assets = await loadAssets(env, row.vendor_code, row.contact_lines,
                                   merged.artwork, merged.type.family);

@@ -12,6 +12,13 @@ import fontkit from '@pdf-lib/fontkit';
 import { invoiceRef, naira } from '../shared/reference.js';
 import { mergeTemplate, hexRgb } from '../shared/template.js';
 
+/**
+ * Bumped when a change here would alter the bytes of an already-issued
+ * document. Stored on each invoice, so if that ever happens you can tell which
+ * documents were drawn by which renderer instead of guessing.
+ */
+export const RENDERER_VERSION = 1;
+
 // A4 at 72dpi. The source Google Docs template was 1109x1583pt — ~1.87x A4 and
 // not a standard size. Everything below is the source geometry multiplied by K.
 // Geometry, colour and artwork all come from the vendor's template. Nothing

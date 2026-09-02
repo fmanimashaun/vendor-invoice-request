@@ -689,33 +689,52 @@ business.
 
 ## Known gaps
 
-- No email delivery. The approving vendor shares the PDF manually — there is a
-  **Share to WhatsApp** button (`shareInvoice.js`, Web Share API) that hands the
-  file to the OS share sheet, but on desktop that needs the installed WhatsApp
-  app; a browser tab is not a share target, so it falls back to a download. ApprovalMax
-  Capture accepts a forwarded PDF at a per-organisation address, so emailing
-  approved PDFs straight there is the obvious next step — one PDF per email,
-  since ApprovalMax creates a draft for every attachment.
-- No `render_hash`, no template versioning. Regenerating an old invoice after a
-  template change will produce a visually different document. Acceptable while
-  there is one template; revisit if a document is ever disputed.
-- Corrections are reject-then-resubmit. No supersede/revision chain.
-- The first vendor's letterhead contact block was transcribed from a raster and
-  is unverified. Check every vendor's contact lines against their own artwork.
-- **The WHT treatment is an assumption worth confirming.** VAT is added to the
-  total and WHT is shown as a deduction with a net-payable figure, which is the
-  standard Nigerian treatment. Nobody has confirmed it against how the client AP
-  actually pays. Getting it wrong changes what is transferred.
-- **One template, many vendors.** `renderInvoice.js` still has the first vendor's
-  geometry baked in (`K = 595.28 / 1109`, the `ART()` offsets). Onboarding a
-  vendor swaps the artwork and the contact lines but not the layout, so a vendor
-  whose invoice is laid out differently will come out looking like the first
-  vendor's
-  with their logo on it. Making the geometry a stored per-vendor template spec,
-  drafted from a sample PDF, is the next piece of work.
-- A rejection is terminal for **all** vendors, not just the one that rejected.
-  If vendor A declines a request, vendor B never sees it again. That may not be
-  what you want once there is real competition for the queue.
-- Every vendor sees every pending request, including amount, site and
-  description. That is deliberate — it is what makes the queue a marketplace —
-  but it does mean vendors can see each other's potential work.
+Split by what would close them, because "known gap" on its own is a place
+things go to be forgotten.
+
+### Needs a decision, not code
+
+- **A rejection is terminal for every vendor, not just the one that rejected.**
+  If vendor A declines, vendor B never sees the request again. Defensible while
+  a rejection means "this bill is wrong", wrong if it means "not for me". The
+  fix is small either way — return it to the pending pool instead of marking it
+  decided — but which behaviour you want is a business call.
+- **The WHT treatment is an assumption.** VAT is added to the total, WHT shown
+  as a deduction with a net-payable figure. That is the standard Nigerian
+  treatment and nobody has confirmed it against how the client AP actually
+  pays. Getting it wrong changes what is transferred.
+- **Corrections are reject-then-resubmit.** No supersede or revision chain, so
+  a corrected invoice is a new number with no link to the one it replaces. Fine
+  while corrections are rare; an auditor tracing one will have to be told.
+- **Every vendor sees every pending request**, including amount, site and
+  description. Deliberate — it is what makes the queue a marketplace — but it
+  does mean vendors see each other's potential work.
+
+### Needs something this deployment does not have
+
+- **No email delivery.** The approving vendor shares the PDF by hand; there is
+  a **Share to WhatsApp** button (`shareInvoice.js`, Web Share API) that hands
+  the file to the OS share sheet, though on desktop that needs the installed
+  app and otherwise falls back to a download. ApprovalMax Capture accepts a
+  forwarded PDF at a per-organisation address, so mailing approved PDFs
+  straight there is the obvious next step — one per email, since ApprovalMax
+  creates a draft per attachment. Blocked on choosing a provider and holding
+  its credentials, not on code.
+- **The first vendor's letterhead contact block was transcribed from a raster**
+  and is unverified. Check every vendor's contact lines against their own
+  artwork; nothing in the code can tell you it is wrong.
+
+### Accepted, with the reasoning
+
+- **Artwork is not frozen onto an issued invoice, only the layout is.** The
+  PNGs live in KV under the vendor's code and are fetched at render time, so
+  replacing a letterhead image does change how an old document regenerates.
+  Snapshotting a few hundred KB per invoice to close that is the wrong trade
+  while artwork changes are rare and visible. `invoices.renderer_version` is
+  there so this can be revisited without guesswork.
+- **The audit trail is tamper-evident, not tamper-proof.** The database refuses
+  UPDATE and DELETE on `audit_log`, and the hash chain plus the KV anchor make
+  a rewrite provable. Someone holding the D1 credentials can still drop the
+  table. Genuine tamper-proofing needs storage the operator cannot write to,
+  which is out of proportion here — but do not claim more than the first
+  sentence.

@@ -119,6 +119,20 @@ export default function App() {
     }
   }, [load]);
 
+  // The favicon lives in configuration, not in the build, so there is no file
+  // to swap — the tag is written when we learn what it should be. Without
+  // this, /favicon.ico 404s and the tab shows the browser's blank page icon.
+  useEffect(() => {
+    if (!boot?.favicon) return;
+    const link = document.querySelector("link[rel='icon']")
+      || document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'icon' }));
+    link.href = boot.favicon;
+  }, [boot?.favicon]);
+
+  useEffect(() => {
+    if (boot?.orgName) document.title = `${boot.orgName} · Invoice requests`;
+  }, [boot?.orgName]);
+
   const refresh = useCallback(async () => {
     try {
       const { requests: rs } = await api.requests();
@@ -186,9 +200,12 @@ export default function App() {
       }}>
         <strong style={{ fontSize: 15, letterSpacing: 0.2 }}>
           Vendor<span style={{ color: T.blue }}>Invoice</span>
-          {boot.orgName && (
-            <span style={{ color: T.textDim, fontWeight: 400 }}> · {boot.orgName}</span>
-          )}
+          {boot.logo
+            ? <img src={boot.logo} alt={boot.orgName || ''}
+                   style={{ height: 22, marginLeft: 10, verticalAlign: 'middle' }} />
+            : boot.orgName && (
+              <span style={{ color: T.textDim, fontWeight: 400 }}> · {boot.orgName}</span>
+            )}
         </strong>
 
         <nav style={{ display: 'flex', gap: 6, marginLeft: 'auto', flexWrap: 'wrap' }}>
@@ -270,8 +287,11 @@ export default function App() {
           <Locations
             feeKobo={boot.feeKobo}
             orgName={boot.orgName}
+            logo={boot.logo}
+            favicon={boot.favicon}
             onSaved={(cfg) => setBoot({
               ...boot, feeKobo: cfg.default_fee_kobo, orgName: cfg.org_name,
+              logo: cfg.logo_data_uri || null, favicon: cfg.favicon_data_uri || null,
             })}
           />
         )}

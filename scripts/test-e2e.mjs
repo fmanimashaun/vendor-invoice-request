@@ -821,13 +821,25 @@ check('the vendor list shows which vendors have a template',
   (r.data?.vendors || []).find((v) => v.id === 1)?.has_template === true,
   JSON.stringify((r.data?.vendors || []).map((v) => [v.code, v.has_template])));
 
-// The document still renders, and differently from the default.
+// A template applies to what is issued NEXT, never to what is already out.
+//
+// These two assertions used to save a layout and then regenerate an
+// already-issued invoice, expecting the bytes to change. That was the bug: the
+// PDF route joined the vendor's CURRENT template, so editing a layout rewrote
+// documents that had already gone to a tax authority. An issued invoice now
+// carries its own frozen copy.
 const tplPdf = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
-check('an invoice renders through a custom template',
+check('an already-issued invoice still renders after a layout change',
   tplPdf.status === 200 && tplPdf.data?.length > 20000, `status=${tplPdf.status}`);
-check('and the output actually differs from the default layout',
-  tplPdf.data.length !== byVictor.data.length,
+check('and is UNCHANGED by it — it kept the layout it was issued with',
+  tplPdf.data.length === byVictor.data.length,
   `${tplPdf.data.length} vs ${byVictor.data.length}`);
+
+// Whereas the vendor's stored layout is genuinely different now, so anything
+// issued from here on picks it up. Proven end to end further down.
+check('the vendor\'s live layout did change',
+  /003366/.test(DB.db.prepare('SELECT template_json AS t FROM vendors WHERE id = 1').get().t || ''),
+  DB.db.prepare('SELECT template_json AS t FROM vendors WHERE id = 1').get().t?.slice(0, 90));
 
 // Templates that would produce an unusable document are refused at upload,
 // not discovered at approval time.
@@ -852,9 +864,13 @@ r = await call('reladmin', '/api/vendors/1/template', { method: 'PUT', body: { t
   staticText: [{ text: 'ALPHA SERVICES LTD', x: 60, top: 40, size: 14, bold: true }],
 } } });
 check('stationery text is accepted', r.status === 200, JSON.stringify(r.data));
+check('and is stored against the vendor for the next invoice',
+  /ALPHA SERVICES LTD/.test(
+    DB.db.prepare('SELECT template_json AS t FROM vendors WHERE id = 1').get().t || ''),
+  'not stored');
 const withStatic = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
-check('and reaches the rendered document',
-  withStatic.status === 200 && withStatic.data.length !== tplPdf.data.length,
+check('while the issued document is still untouched',
+  withStatic.status === 200 && withStatic.data.length === tplPdf.data.length,
   `${withStatic.data?.length} vs ${tplPdf.data.length}`);
 
 // Font family: metric-compatible stand-ins for the faces invoices are set in.
@@ -1881,6 +1897,156 @@ check('a range with nothing in it returns nothing, not everything',
 check('the action list is offered for the filter UI',
   Array.isArray(r.data?.actions) && r.data.actions.length > 0,
   JSON.stringify(r.data?.actions));
+
+// == Branding is configuration, not a build artifact ===================
+//
+// The logo and the browser icon are set by the admin after deployment, so a
+// fresh deployment of this repo has nothing about any particular company in
+// it. Stored as data: URIs in `config` — no bucket, no CDN, no second origin
+// to set up before the app looks like itself.
+
+const PNG_1PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+  + 'AAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000, logo_data_uri: PNG_1PX } });
+check('a logo can be set', r.status === 200, JSON.stringify(r.data)?.slice(0, 160));
+check('and is stored', r.data?.config?.logo_data_uri === PNG_1PX,
+  (r.data?.config?.logo_data_uri || '').slice(0, 40));
+
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000, favicon_data_uri: PNG_1PX } });
+check('so can a browser icon', r.status === 200 && r.data?.config?.favicon_data_uri === PNG_1PX,
+  (r.data?.config?.favicon_data_uri || '').slice(0, 40));
+check('and setting one leaves the other alone',
+  r.data?.config?.logo_data_uri === PNG_1PX, 'the logo was cleared');
+
+// Every user needs these on first paint, so they ride along with bootstrap
+// rather than costing a second request.
+r = await call('rel', '/api/bootstrap');
+check('bootstrap carries the branding', r.data?.logo === PNG_1PX && r.data?.favicon === PNG_1PX,
+  JSON.stringify({ logo: (r.data?.logo || '').slice(0, 20) }));
+
+// SVG is refused. It is rendered into an <img> and a <link rel=icon> for every
+// user, and an svg+xml payload can carry script — an admin uploading a logo
+// should not be a way to run code on everyone's console.
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000,
+  logo_data_uri: 'data:image/svg+xml;base64,' + Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').toString('base64') } });
+check('SVG is refused', r.status === 400 && /SVG can carry script/.test(r.data?.message || ''),
+  JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000, logo_data_uri: 'https://example.com/logo.png' } });
+check('a URL is not a data: URI and is refused', r.status === 400, JSON.stringify(r.data));
+
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000,
+  logo_data_uri: 'data:image/png;base64,' + 'A'.repeat(400 * 1024) } });
+check('anything over 256 KB is refused', r.status === 400 && /256 KB/.test(r.data?.message || ''),
+  JSON.stringify(r.data)?.slice(0, 120));
+check('and the good logo survived the rejected ones',
+  (await call('reladmin', '/api/platform-config',
+    { method: 'PUT', body: { default_fee_kobo: 10000 } })).data?.config?.logo_data_uri === PNG_1PX,
+  'the logo was lost');
+
+// An empty string clears it; an absent key must not.
+r = await call('reladmin', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000, logo_data_uri: '' } });
+check('an empty string clears the logo', r.data?.config?.logo_data_uri === null,
+  JSON.stringify(r.data?.config?.logo_data_uri));
+check('while an omitted key left the icon in place',
+  r.data?.config?.favicon_data_uri === PNG_1PX, 'the icon was cleared too');
+
+// Branding is worth a line in the trail: it changes what every user sees, and
+// "who put that there" is a real question. The images themselves are not.
+r = await call('reladmin', '/api/audit?action=BRANDING_CHANGED');
+check('branding changes are recorded', r.data?.entries?.length > 0,
+  String(r.data?.entries?.length));
+check('and the entries carry no image data',
+  !JSON.stringify(r.data.entries).includes('iVBORw0'),
+  'a data URI leaked into the audit trail');
+check('but do say what happened',
+  r.data.entries.some((e) => /logo cleared/.test(e.summary || ''))
+  && r.data.entries.some((e) => /logo set/.test(e.summary || '')),
+  JSON.stringify(r.data.entries.map((e) => e.summary).slice(0, 4)));
+
+// It is the client admin's setting. A vendor has no say in the client's tool.
+r = await call('victor', '/api/platform-config', { method: 'PUT', body: {
+  default_fee_kobo: 10000, logo_data_uri: PNG_1PX } });
+check('a vendor cannot change the branding', r.status === 403, String(r.status));
+
+// == An issued document never changes ==================================
+//
+// CLAUDE.md claims regeneration hands back a byte-identical document. It did
+// not: the PDF route joined vendors.template_json -- the CURRENT layout -- so
+// an admin editing a vendor's template rewrote every invoice that vendor had
+// already issued. Same class of bug as joining vendor_config for bank details
+// instead of copying them, which invariant 3 exists to prevent.
+
+const issuedRow = DB.db.prepare(
+  'SELECT i.*, v.id AS vid FROM invoices i JOIN vendors v ON v.id = i.vendor_id'
+  + ' ORDER BY i.id LIMIT 1').get();
+check('an invoice has been issued to test against', !!issuedRow, 'none found');
+check('and it stored the layout it was issued with',
+  !!issuedRow.template_json, 'template_json is null');
+check('stored fully merged, so a DEFAULT_TEMPLATE change cannot move it either',
+  !!JSON.parse(issuedRow.template_json).page?.w, issuedRow.template_json?.slice(0, 80));
+check('and records which renderer drew it',
+  issuedRow.renderer_version >= 1, String(issuedRow.renderer_version));
+
+// The vendor's own people may regenerate. Grab the document as issued.
+const issuingRep = DB.db.prepare(
+  "SELECT email FROM users WHERE vendor_id = ? AND status = 'active' LIMIT 1").get(issuedRow.vid);
+await sessionFor('regen', issuingRep.email);
+r = await call('regen', `/api/invoices/${issuedRow.invoice_no}/pdf`);
+check('the issuing vendor can regenerate it', r.status === 200, String(r.status));
+const before = r.data;
+check('and it is a PDF', new TextDecoder().decode(before.slice(0, 5)) === '%PDF-', 'not a pdf');
+
+// Now change that vendor's layout as drastically as the validator allows.
+r = await call('reladmin', `/api/vendors/${issuedRow.vid}/template`, {
+  method: 'PUT',
+  body: { template: {
+    version: 1,
+    // right is an absolute x, not an inset, so it must exceed left.
+    margins: { left: 90, right: 505 },
+    type: { body: 7, small: 5 },
+    colors: { ink: '#aa0000', soft: '#886644', rule: '#00aa00' },
+    table: { colDesc: 120, colExtra: 300, colAmount: 430 },
+  } },
+});
+check('the layout change is accepted', r.status === 200, JSON.stringify(r.data)?.slice(0, 200));
+
+const liveTpl = DB.db.prepare('SELECT template_json FROM vendors WHERE id = ?').get(issuedRow.vid);
+check('the vendor now has a different live layout',
+  /aa0000/.test(liveTpl.template_json || ''), liveTpl.template_json?.slice(0, 80));
+
+// THE ASSERTION. The already-issued document must be untouched by that.
+r = await call('regen', `/api/invoices/${issuedRow.invoice_no}/pdf`);
+check('regenerating after the layout changed still works', r.status === 200, String(r.status));
+const after = r.data;
+check('and the document is byte-for-byte what it was',
+  before.length === after.length && before.every((b, k) => b === after[k]),
+  `${before.length} bytes before, ${after.length} after`);
+
+// A NEW invoice from the same vendor does pick up the new layout -- the
+// snapshot freezes history, it does not freeze the vendor.
+r = await call('rel', '/api/requests', { method: 'POST', body: {
+  bu_code: 'RFC', site_code: 'LEK', type_code: 'ELEC', period: '2026-10',
+  amount_kobo: 777700, asset_key: '55443322',
+  description: 'Layout snapshot check' } });
+check('a fresh request is raised', r.status === 201, JSON.stringify(r.data)?.slice(0, 150));
+const freshReqId = r.data?.request?.id;
+r = await call('regen', `/api/requests/${freshReqId}/approve`, { method: 'POST' });
+check('and approved by the same vendor', r.status === 201, JSON.stringify(r.data));
+const freshTpl = DB.db.prepare(
+  'SELECT template_json FROM invoices WHERE request_id = ?').get(freshReqId);
+check('the new invoice carries the NEW layout',
+  /aa0000/.test(freshTpl.template_json || ''), freshTpl.template_json?.slice(0, 90));
+check('so freezing history did not freeze the vendor',
+  freshTpl.template_json !== issuedRow.template_json, 'the two are identical');
 
 // == Passwords: whose they are, and when you must change one ==========
 

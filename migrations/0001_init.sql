@@ -138,6 +138,20 @@ CREATE TABLE IF NOT EXISTS config (
   -- The organisation running this deployment. Set on first run and shown in
   -- the UI; nothing about a particular company is compiled into the code.
   org_name          TEXT NOT NULL DEFAULT '',
+
+  -- Branding for the app itself, set by the admin after deployment.
+  --
+  -- NOT the invoice letterhead. That is per-vendor artwork in KV and belongs
+  -- to whoever is issuing the document; this is the client's own mark on their
+  -- own tool, and confusing the two would put the payer's logo on the payee's
+  -- invoice. Nothing about any particular company is compiled in, which is the
+  -- same reason org_name lives here.
+  --
+  -- Stored as data: URIs so a fresh deployment needs no bucket, no CDN and no
+  -- second origin to configure before the app looks like itself. Size is
+  -- capped in the worker; these are icons, not photographs.
+  logo_data_uri     TEXT,
+  favicon_data_uri  TEXT,
   default_fee_kobo  INTEGER NOT NULL DEFAULT 10000,   -- minor units
 
   -- Identifies THIS deployment, stamped on every invoice number it issues.
@@ -364,6 +378,23 @@ CREATE TABLE IF NOT EXISTS invoices (
   approver_email      TEXT,
   -- The client organisation as named when this document went out.
   client_name         TEXT,
+
+  -- The layout, resolved and frozen at issue, for the same reason as
+  -- everything above it. The PDF route used to join vendors.template_json --
+  -- the CURRENT layout -- so an admin editing a vendor's template silently
+  -- changed every invoice that vendor had already issued. Regeneration is
+  -- supposed to hand back the same document, and it did not.
+  --
+  -- Stored fully merged, not as the vendor's overrides, so a later change to
+  -- DEFAULT_TEMPLATE in the code cannot move an old document either.
+  --
+  -- What this does NOT freeze is the artwork: the PNGs live in KV under the
+  -- vendor's code and are fetched at render time. Replacing a letterhead image
+  -- still changes old documents. Snapshotting a few hundred KB per invoice to
+  -- close that is the wrong trade while artwork changes are rare and visible;
+  -- renderer_version is here so it can be revisited without guesswork.
+  template_json       TEXT,
+  renderer_version    INTEGER NOT NULL DEFAULT 1,
 
   issued_at   TEXT NOT NULL DEFAULT (datetime('now')),
   issued_by   INTEGER NOT NULL REFERENCES users(id),
