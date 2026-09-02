@@ -1803,6 +1803,82 @@ check('the login screen is told client passwords are off',
 // Back to passwords, so later assertions run against a plain deployment.
 DB.db.prepare('UPDATE config SET sso_enabled = 0, sso_verified_at = NULL WHERE id = 1').run();
 
+// ── Audit trail ───────────────────────────────────────────────────────
+//
+// Everything above has already exercised the routes that write here, so this
+// reads back what those actions left behind rather than staging new ones.
+
+r = await call('reladmin', '/api/audit');
+check('the audit trail is readable by the client admin', r.status === 200, String(r.status));
+const trail = r.data?.entries ?? [];
+check('it recorded something', trail.length > 0, `${trail.length} entries`);
+
+const actions = new Set(trail.map((e) => e.action));
+for (const a of ['REQUEST_RAISED', 'INVOICE_ISSUED', 'REQUEST_REJECTED',
+                 'VENDOR_ONBOARDED', 'BANK_DETAILS_CHANGED', 'PASSWORD_RESET_BY_ADMIN']) {
+  check(`${a} is recorded`, actions.has(a), [...actions].join(','));
+}
+
+// Who did it must survive the person being renamed or removed, exactly as the
+// approver on an issued invoice does.
+const auditIssued = trail.find((e) => e.action === 'INVOICE_ISSUED');
+check('an entry names the actor by value, not by reference',
+  !!auditIssued?.actor_email && !!auditIssued?.actor_name, JSON.stringify(auditIssued?.actor_email));
+check('and records which role context they were acting in',
+  auditIssued?.actor_context !== undefined, JSON.stringify(auditIssued?.actor_context));
+check('an issued invoice entry carries the number and the money',
+  !!auditIssued?.after?.invoice_no && auditIssued?.after?.total_kobo > 0,
+  JSON.stringify(auditIssued?.after));
+
+// A bank change is the one event whose subject is the account number, so it
+// is the one place the number belongs.
+const auditBank = trail.find((e) => e.action === 'BANK_DETAILS_CHANGED');
+check('a bank change records both the old and the new account',
+  !!auditBank?.before?.bank_account_number && !!auditBank?.after?.bank_account_number
+  && auditBank.before.bank_account_number !== auditBank.after.bank_account_number,
+  JSON.stringify({ before: auditBank?.before, after: auditBank?.after }));
+
+// The check that matters most: a log that leaks credentials is a liability,
+// not a control.
+// "password" appears legitimately in action names and summaries. What must
+// never appear is a hash, a salt, or a secret anyone actually typed.
+const dump = JSON.stringify(trail);
+for (const secret of ['pw_hash', 'pw_salt', 'correct-horse-battery',
+                      'a-brand-new-passphrase', 'client-admin-password']) {
+  check(`the trail leaks no ${secret}`, !dump.includes(secret), secret);
+}
+const auditReset = trail.find((e) => e.action === 'PASSWORD_RESET_BY_ADMIN');
+check('a password reset is recorded, with no password in the row',
+  !!auditReset && !auditReset.after && !auditReset.before,
+  JSON.stringify(auditReset));
+
+// Append-only means there is no way to change it, not that we ask nicely.
+for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+  r = await call('reladmin', '/api/audit', { method });
+  check(`${method} /api/audit is not a route`, r.status === 404, String(r.status));
+}
+r = await call('reladmin', '/api/audit/1', { method: 'DELETE' });
+check('a single entry cannot be deleted', r.status === 404, String(r.status));
+
+// It names client staff and their decisions. That is the client's governance
+// record and none of a vendor's business.
+r = await call('victor', '/api/audit');
+check('a vendor cannot read the audit trail', r.status === 403, String(r.status));
+r = await call('nobody', '/api/audit');
+check('nor can anyone without a session', r.status === 401, String(r.status));
+
+// Filters, since an auditor arrives with a question, not a scroll wheel.
+r = await call('reladmin', '/api/audit?action=INVOICE_ISSUED');
+check('filtering by action returns only that action',
+  r.status === 200 && r.data.entries.every((e) => e.action === 'INVOICE_ISSUED'),
+  `${r.data?.entries?.length} entries`);
+r = await call('reladmin', '/api/audit?from=1970-01-01&to=1970-01-02');
+check('a range with nothing in it returns nothing, not everything',
+  r.status === 200 && r.data.entries.length === 0, `${r.data?.entries?.length}`);
+check('the action list is offered for the filter UI',
+  Array.isArray(r.data?.actions) && r.data.actions.length > 0,
+  JSON.stringify(r.data?.actions));
+
 // ── Report ────────────────────────────────────────────────────────────
 
 console.log(results.join('\n'));

@@ -373,3 +373,42 @@ CREATE TABLE IF NOT EXISTS invoices (
   UNIQUE (seq),
   CHECK (total_kobo = amount_kobo + fee_kobo + vat_kobo)
 );
+
+-- ── Audit trail ───────────────────────────────────────────────────────
+--
+-- Append-only. Nothing in the app updates or deletes a row here, and there is
+-- no route that could: a log the operator can edit answers no question an
+-- auditor is asking.
+--
+-- The actor is recorded BY VALUE as well as by id, for the same reason the
+-- approver is copied onto an issued invoice. `users.id` is never deleted, but
+-- a name and an email are editable, and "who did this" must keep saying what
+-- it said at the time.
+--
+-- before_json / after_json hold only the fields that changed. Secrets never
+-- reach them — see REDACTED in worker.js; a password hash in an audit row is
+-- a credential store nobody remembered they had.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at            TEXT NOT NULL DEFAULT (datetime('now')),
+
+  actor_id      INTEGER REFERENCES users(id),
+  actor_email   TEXT NOT NULL,
+  actor_name    TEXT NOT NULL,
+  actor_org     TEXT NOT NULL,
+  -- Which hat they had on. A person holding both roles who changed something
+  -- while acting as a member is a different fact from doing it as an admin.
+  actor_context TEXT,
+
+  action        TEXT NOT NULL,          -- BANK_DETAILS_CHANGED, INVOICE_ISSUED, ...
+  entity        TEXT,                   -- 'vendor:3', 'request:412', 'user:7'
+  entity_label  TEXT,                   -- readable at the time: 'Acme Services Ltd'
+  summary       TEXT,                   -- one line for the reader
+
+  before_json   TEXT,
+  after_json    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log(at DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log(action, at DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_entity ON audit_log(entity, at DESC);

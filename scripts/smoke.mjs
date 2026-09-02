@@ -106,6 +106,7 @@ const run = async () => {
   await expect('GET /api/bootstrap  unauthenticated', '/api/bootstrap', 401);
   await expect('GET /api/requests   unauthenticated', '/api/requests', 401);
   await expect('GET /api/vendors    unauthenticated', '/api/vendors', 401);
+  await expect('GET /api/audit      unauthenticated', '/api/audit', 401);
 
   if (!EMAIL || !PASSWORD) {
     head('Signed-in checks skipped');
@@ -194,6 +195,22 @@ const run = async () => {
     const y = new Date().getUTCFullYear();
     await expect('GET /api/summary', `/api/summary?from=${y}-01-01&to=${y}-12-31`, 200);
 
+    head('Audit trail');
+    const audit = await expect('GET /api/audit', '/api/audit', 200);
+    if (audit.data) {
+      const n = audit.data.entries?.length ?? 0;
+      console.log(`       ${n} entries, ${audit.data.total ?? 0} total`);
+      // Append-only is a property of the routing table, not a promise.
+      for (const method of ['POST', 'PUT', 'DELETE']) {
+        await expect(`${method} /api/audit is not a route`, '/api/audit', 404, { method });
+      }
+      // A log that leaks credentials is a liability, not a control.
+      const dump = JSON.stringify(audit.data.entries || []);
+      const leaks = ['pw_hash', 'pw_salt'].filter((k) => dump.includes(k));
+      if (leaks.length) bad(`the audit trail contains ${leaks.join(', ')}`);
+      else ok('no password hashes or salts in the trail');
+    }
+
     head('The admin must NOT be able to issue or read a document');
     // The whole point of the system: the payer cannot produce its own
     // evidence. A 200 here would make every invoice worthless as audit
@@ -206,9 +223,10 @@ const run = async () => {
   if (!isClient) {
     head('Vendor screens');
     await expect('GET /api/requests?status=pending', '/api/requests?status=pending', 200);
-    head('A vendor must NOT be able to manage the roster');
+    head('A vendor must NOT be able to manage the roster or read the trail');
     await expect('GET /api/users  is refused', '/api/users', 403);
     await expect('GET /api/vendors is refused', '/api/vendors', 403);
+    await expect('GET /api/audit  is refused', '/api/audit', 403);
   }
 
   head('Signing out');

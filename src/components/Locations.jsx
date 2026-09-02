@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { T, FONT, input as inputStyle } from '../theme.js';
 import { Card, Field, Table, Td, Banner, button , SubTabs } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
+import Audit from './Audit.jsx';
 import { naira } from '../../shared/reference.js';
 
 const BLANK_SITE = { code: '', name: '', bu_code: '' };
@@ -466,6 +467,7 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
         </form>
       </Card>
     </>,
+    audit: <Audit />,
     signin: <>
       <Card title="Staff single sign-on">
         <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 6px', lineHeight: 1.5 }}>
@@ -533,6 +535,7 @@ export default function Locations({ feeKobo, orgName, onSaved }) {
           ['organisation', 'Organisation'],
           ['invoicing', 'Invoicing'],
           ['signin', 'Sign-in'],
+          ['audit', 'Audit trail'],
         ]}
         active={sub}
         onChange={setSub}

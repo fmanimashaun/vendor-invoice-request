@@ -615,6 +615,47 @@ Two traps it exists to catch, both of which have already happened here:
   grep -E 'routes|observability' dist/<worker-name>/wrangler.json
   ```
 
+## The audit trail
+
+`audit_log` is append-only. There is a route to read it and none to change it,
+and the tests assert that POST/PUT/PATCH/DELETE on `/api/audit` are 404 rather
+than merely forbidden — a log the operator can tidy answers no question an
+auditor is asking.
+
+Fifteen events are recorded: the request lifecycle (`REQUEST_RAISED`,
+`REQUEST_WITHDRAWN`, `REQUEST_REJECTED`, `INVOICE_ISSUED`) and every
+configuration change that matters (`BANK_DETAILS_CHANGED`,
+`PASSWORD_RESET_BY_ADMIN`, `VENDOR_*`, `SSO_CONFIG_CHANGED`, `FONT_*`).
+
+Three properties worth keeping:
+
+- **The actor is stored by value, not just by id.** `actor_email`,
+  `actor_name`, `actor_org` and `actor_context` are copied at the time, for the
+  same reason the approver is copied onto an issued invoice: a name is
+  editable, and "who did this" must keep saying what it said then.
+  `actor_context` records which hat they had on — a person holding both roles
+  who changed something as a member is a different fact from doing it as an
+  admin.
+- **`REDACTED` in `worker.js` is a denylist that the diff applies to every
+  field.** A password hash in an audit table is a credential store nobody
+  remembers they have. An account number appears in exactly one event,
+  `BANK_DETAILS_CHANGED`, whose entire subject is that it changed. There are
+  tests that grep the whole trail for hashes, salts and the literal passwords
+  the suite uses.
+- **`audit()` never throws.** A failure to log must not roll back a legitimate
+  approval or lock an admin out of fixing a bank account — the same call the
+  sequence watermark makes. State the tradeoff rather than hiding it: this is
+  an audit trail, not a consensus log, and a lost row is possible. It writes to
+  the same D1 as the change, so in practice losing one means the write before
+  it already succeeded and the connection dropped in between.
+
+`diff()` stores only the fields that actually differ, skipping `*_at` and
+`updated_by` because they always differ and never carry information.
+
+The read route is client-admin only. It names client staff and their
+decisions — that is the client's governance record and none of a vendor's
+business.
+
 ## Known gaps
 
 - No email delivery. The approving vendor shares the PDF manually — there is a

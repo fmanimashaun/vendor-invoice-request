@@ -227,6 +227,7 @@ async function route(request, env, url) {
     return upsertBu(request, env, me, m[1]);
   if (path === '/api/bu-sites' && method === 'POST')  return linkBuSite(request, env, me);
   if (path === '/api/platform-config' && method === 'PUT') return updatePlatformConfig(request, env, me);
+  if (path === '/api/audit' && method === 'GET')       return listAudit(env, me, url);
   if (path === '/api/numbering' && method === 'GET')   return getNumbering(env, me);
   if (path === '/api/sso-config' && method === 'GET')  return getSsoConfig(env, me);
   if (path === '/api/sso-config' && method === 'PUT')  return putSsoConfig(request, env, me);
@@ -562,6 +563,10 @@ export async function resolveOrProvisionSsoUser(env, claims, allowedDomains) {
        VALUES (?1, ?2, 'client', 'member', 'sso:auto') RETURNING *`,
     ).bind(email, fullName).first();
     console.warn('USER_AUTOPROVISIONED', email);
+  await audit(env, null, 'USER_AUTOPROVISIONED', {
+    entity: `user:${user?.id}`, label: email,
+    summary: `${email} provisioned on first single sign-on`,
+  });
     return { user };
   } catch (e) {
     if (!String(e).includes('UNIQUE')) throw e;
@@ -956,6 +961,11 @@ async function putSsoConfig(request, env, me) {
   ).bind(enabled ? 1 : 0, teamDomain || null, aud || null, domains || null, me.email).run();
 
   console.warn('SSO_CONFIG_CHANGED', me.email, enabled ? 'enabled' : 'disabled');
+  await audit(env, me, 'SSO_CONFIG_CHANGED', {
+    entity: 'config:1',
+    summary: `Single sign-on ${enabled ? 'enabled' : 'disabled'}`,
+    before: { sso_enabled: enabled ? 0 : 1 }, after: { sso_enabled: enabled ? 1 : 0 },
+  });
   return getSsoConfig(env, me);
 }
 
@@ -1054,6 +1064,9 @@ async function uploadFont(request, env, me) {
 
   assetCache.clear();
   console.warn('FONT_UPLOADED', me.email, key);
+  await audit(env, me, 'FONT_UPLOADED', {
+    entity: `font:${key}`, label: name, summary: `Font ${name} (${key}) uploaded`,
+  });
   return json({ font: { key, name, kind, metricOf, builtin: false } }, 201);
 }
 
@@ -1082,6 +1095,9 @@ async function deleteFont(env, me, key) {
   await env.ASSETS_KV.delete(keys.bold);
   assetCache.clear();
   console.warn('FONT_DELETED', me.email, key);
+  await audit(env, me, 'FONT_DELETED', {
+    entity: `font:${key}`, label: key, summary: `Font ${key} deleted`,
+  });
   return json({ ok: true });
 }
 
@@ -1123,6 +1139,12 @@ async function resetUserPassword(request, env, me, id) {
   ).bind(pw.hash, pw.salt, pw.iterations, id).run();
 
   console.warn('PASSWORD_RESET_BY_ADMIN', me.email, target.email);
+  // The password itself never reaches the row — see REDACTED. What matters is
+  // that an admin knows this account's secret until the owner replaces it.
+  await audit(env, me, 'PASSWORD_RESET_BY_ADMIN', {
+    entity: `user:${target.id}`, label: target.full_name,
+    summary: `Temporary password set for ${target.email}; they must change it at next sign-in`,
+  });
   return json({ ok: true, mustChange: true });
 }
 
@@ -1158,6 +1180,10 @@ async function changeOwnPassword(request, env, me) {
   ).bind(pw.hash, pw.salt, pw.iterations, me.id).run();
 
   console.warn('PASSWORD_CHANGED', me.email);
+  await audit(env, me, 'PASSWORD_CHANGED', {
+    entity: `user:${me.id}`, label: me.full_name,
+    summary: 'Changed their own password',
+  });
   return json({ ok: true });
 }
 
@@ -1222,6 +1248,10 @@ async function createVendor(request, env, me) {
            tax.tin, tax.vat, tax.wht, tax.basis, me.email).run();
 
     console.warn('VENDOR_ONBOARDED', me.email, code);
+  await audit(env, me, 'VENDOR_ONBOARDED', {
+    entity: `vendor:${v.id}`, label: v.name,
+    summary: `${v.name} onboarded as ${code}`,
+  });
     return json({ vendor: publicVendor(v) }, 201);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return fail('duplicate', 'That vendor code already exists.', 409);
@@ -1251,6 +1281,12 @@ async function setVendorStatus(request, env, me, id) {
 
   console.warn('VENDOR_STATUS_CHANGED', me.email, status, id);
   const v = await env.DB.prepare('SELECT * FROM vendors WHERE id = ?1').bind(id).first();
+  await audit(env, me, 'VENDOR_STATUS_CHANGED', {
+    entity: `vendor:${id}`, label: v?.name,
+    summary: `${v?.name} ${status === 'active' ? 'restored' : 'suspended'}`,
+    before: { status: status === 'active' ? 'disabled' : 'active' },
+    after: { status },
+  });
   return json({ vendor: publicVendor(v) });
 }
 
@@ -1393,6 +1429,10 @@ async function putVendorTemplate(request, env, me, id) {
   // per vendor for the life of the isolate.
   assetCache.clear();
   console.warn('VENDOR_TEMPLATE_CHANGED', me.email, id);
+  await audit(env, me, 'VENDOR_TEMPLATE_CHANGED', {
+    entity: `vendor:${id}`,
+    summary: `Invoice layout changed for vendor ${id}`,
+  });
   return json({ template: b.template, isDefault: false, effective: mergeTemplate(b.template) });
 }
 
@@ -1551,6 +1591,12 @@ async function setUserStatus(request, env, me, id) {
   if (!r.meta.changes) return fail('conflict', 'User was not updated.', 409);
 
   console.warn('VENDOR_ROSTER_CHANGED', me.email, status, target.email);
+  await audit(env, me, 'VENDOR_ROSTER_CHANGED', {
+    entity: `user:${id}`, label: target.full_name,
+    summary: `${target.email} ${status === 'active' ? 'restored' : 'removed'}`,
+    before: { status: status === 'active' ? 'disabled' : 'active' },
+    after: { status },
+  });
   const updated = await env.DB.prepare('SELECT * FROM users WHERE id = ?1').bind(id).first();
   return json({ user: publicUser(updated) });
 }
@@ -1752,6 +1798,16 @@ async function createRequest(request, env, me) {
       fee_kobo, amount_kobo, total_kobo, ack_flags, me.id,
     ).first();
 
+    await audit(env, me, 'REQUEST_RAISED', {
+      entity: `request:${row.id}`, label: row.request_ref,
+      summary: `${row.request_ref} raised for ${naira(row.total_kobo)}`
+        + (warnings.length
+          ? ` (${warnings.length} warning${warnings.length > 1 ? 's' : ''} confirmed past)` : ''),
+      after: {
+        bu_code: row.bu_code, site_code: row.site_code, type_code: row.type_code,
+        period: row.period, amount_kobo: row.amount_kobo, ack_flags: row.ack_flags,
+      },
+    });
     return json({ request: decorate(row, ref) }, 201);
   } catch (e) {
     if (String(e).includes('UNIQUE')) return duplicateResponse(env, b, type, ref);
@@ -1898,6 +1954,12 @@ async function withdrawRequest(env, me, id) {
   ).bind(id, me.id).run();
 
   if (!r.meta.changes) return fail('conflict', 'Only your own pending requests can be withdrawn.', 409);
+  const w = await env.DB.prepare('SELECT request_ref FROM requests WHERE id = ?1').bind(id).first();
+  await audit(env, me, 'REQUEST_WITHDRAWN', {
+    entity: `request:${id}`, label: w?.request_ref,
+    summary: `${w?.request_ref ?? `Request ${id}`} withdrawn by the requester`,
+    before: { status: 'pending' }, after: { status: 'withdrawn' },
+  });
   return json({ ok: true });
 }
 
@@ -1918,6 +1980,15 @@ async function rejectRequest(request, env, me, id) {
   ).bind(id, me.id, String(reason).trim(), me.vendor_id).run();
 
   if (!r.meta.changes) return fail('conflict', 'That request is no longer pending.', 409);
+  const rej = await env.DB.prepare('SELECT request_ref FROM requests WHERE id = ?1').bind(id).first();
+  // A rejection is terminal for every vendor, not just this one, so who did it
+  // and why is the whole record of why a payment did not happen.
+  await audit(env, me, 'REQUEST_REJECTED', {
+    entity: `request:${id}`, label: rej?.request_ref,
+    summary: `${rej?.request_ref ?? `Request ${id}`} rejected: ${String(reason).trim()}`,
+    before: { status: 'pending' },
+    after: { status: 'rejected', reject_reason: String(reason).trim() },
+  });
   return json({ ok: true });
 }
 
@@ -2067,6 +2138,18 @@ async function approveRequest(env, me, id) {
       // for as long as it is intact.
       await bumpSeqWatermark(env, mark, seq);
 
+      // The event an auditor comes for: a document now exists, under this
+      // number, issued by this person, for this money.
+      await audit(env, me, 'INVOICE_ISSUED', {
+        entity: `request:${req.id}`, label: invoice_no,
+        summary: `${invoice_no} issued for ${req.request_ref} — ${naira(totalKobo)}`,
+        after: {
+          invoice_no, seq, request_ref: req.request_ref,
+          amount_kobo: req.amount_kobo, fee_kobo: feeKobo,
+          vat_kobo: vatKobo, wht_kobo: whtKobo, total_kobo: totalKobo,
+          approver: me.full_name, vendor_id: me.vendor_id,
+        },
+      });
       return json({ invoice_no, download: downloadName(invoice_no) }, 201);
     } catch (e) {
       if (String(e).includes('UNIQUE')) continue; // lost the race; recompute seq
@@ -2287,10 +2370,141 @@ async function updateVendorConfig(request, env, me, vendorId) {
       from: { name: before.bank_account_name, number: before.bank_account_number, bank: before.bank_name },
       to:   { name: b.bank_account_name, number: b.bank_account_number, bank: b.bank_name },
     }));
+    // The one place an account number is recorded in the trail: this is the
+    // action whose whole point is that it changed, and the before/after is
+    // the answer to the only question anyone will ask about it.
+    await audit(env, me, 'BANK_DETAILS_CHANGED', {
+      entity: `vendor:${vendor.id}`, label: vendor.name,
+      summary: `Bank account for ${vendor.name} changed`,
+      before: {
+        bank_account_name: before.bank_account_name,
+        bank_account_number: before.bank_account_number,
+        bank_name: before.bank_name,
+      },
+      after: {
+        bank_account_name: b.bank_account_name.trim(),
+        bank_account_number: b.bank_account_number.trim(),
+        bank_name: b.bank_name.trim(),
+      },
+    });
   }
 
   const after = await env.DB.prepare(
     'SELECT * FROM vendor_config WHERE vendor_id = ?1',
   ).bind(vendorId).first();
   return json({ config: after, bankChanged: !!bankChanged });
+}
+
+// ── Audit trail ───────────────────────────────────────────────────────
+//
+// Append-only. There is a route to read it and none to change it.
+//
+// Fields whose value must never be copied into a log row. A password hash in
+// an audit table is a credential store nobody remembers they have, and an
+// account number is already recorded in the before/after of the one action
+// that is allowed to touch it — everywhere else it is noise with a blast
+// radius.
+const REDACTED = new Set([
+  'pw_hash', 'pw_salt', 'password', 'new_password', 'temp_password',
+  'session', 'secret',
+]);
+
+const scrub = (o) => (o && typeof o === 'object'
+  ? Object.fromEntries(Object.entries(o)
+      .filter(([k]) => !REDACTED.has(k))
+      .map(([k, v]) => [k, v]))
+  : o);
+
+/** Only the fields that actually differ, so a row reads as a change. */
+export function diff(before, after) {
+  if (!before || !after) return { before: scrub(before), after: scrub(after) };
+  const b = {}, a = {};
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (REDACTED.has(k)) continue;
+    if (k.endsWith('_at') || k === 'updated_by') continue;   // always differ, never interesting
+    if (String(before[k] ?? '') !== String(after[k] ?? '')) { b[k] = before[k]; a[k] = after[k]; }
+  }
+  return Object.keys(a).length ? { before: b, after: a } : null;
+}
+
+/**
+ * Record something that happened.
+ *
+ * Deliberately never throws. A failure to log must not roll back a legitimate
+ * approval or lock an admin out of fixing a bank account — the same call the
+ * sequence watermark makes. The tradeoff is real and worth stating: this is an
+ * audit trail, not a consensus log, and a lost row is possible. It writes to
+ * the same D1 as the change itself, so in practice the only way to lose one is
+ * for the write that preceded it to have already succeeded and the connection
+ * to drop between the two.
+ */
+export async function audit(env, me, action, {
+  entity = null, label = null, summary = null, before = null, after = null,
+} = {}) {
+  try {
+    const d = (before || after) ? diff(before, after) : null;
+    await env.DB.prepare(
+      `INSERT INTO audit_log
+         (actor_id, actor_email, actor_name, actor_org, actor_context,
+          action, entity, entity_label, summary, before_json, after_json)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`,
+    ).bind(
+      me?.id ?? null,
+      me?.email ?? 'system',
+      me?.full_name ?? 'system',
+      me?.org ?? 'system',
+      me?.ctx ?? null,
+      action, entity, label, summary,
+      d?.before ? JSON.stringify(d.before) : null,
+      d?.after ? JSON.stringify(d.after) : null,
+    ).run();
+  } catch (e) {
+    console.error('AUDIT_WRITE_FAILED', action, entity, String(e));
+  }
+}
+
+/**
+ * Read the trail. Client admin only — it names who did what, which is the
+ * client's own governance record and none of a vendor's business.
+ */
+async function listAudit(env, me, url) {
+  const denied = requireRosterAdmin(me);
+  if (denied) return denied;
+
+  const clauses = [];
+  const binds = [];
+  const q = url.searchParams;
+
+  if (q.get('action')) { clauses.push('action = ?'); binds.push(q.get('action')); }
+  if (q.get('actor'))  { clauses.push('actor_email = ?'); binds.push(q.get('actor')); }
+  if (q.get('entity')) { clauses.push('entity = ?'); binds.push(q.get('entity')); }
+  if (q.get('from'))   { clauses.push('at >= ?'); binds.push(`${q.get('from')} 00:00:00`); }
+  if (q.get('to'))     { clauses.push('at <= ?'); binds.push(`${q.get('to')} 23:59:59`); }
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  // Capped rather than paged: the UI filters and sorts client-side like every
+  // other table here, and an unbounded SELECT over a table that only ever
+  // grows is a slow surprise waiting for the day it matters.
+  const limit = Math.min(Number(q.get('limit')) || 500, 2000);
+
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM audit_log ${where} ORDER BY at DESC, id DESC LIMIT ${limit}`,
+  ).bind(...binds).all();
+
+  const total = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM audit_log ${where}`,
+  ).bind(...binds).first();
+
+  return json({
+    entries: (results || []).map((r) => ({
+      ...r,
+      before: r.before_json ? JSON.parse(r.before_json) : null,
+      after: r.after_json ? JSON.parse(r.after_json) : null,
+    })),
+    total: total?.n ?? 0,
+    truncated: (total?.n ?? 0) > (results || []).length,
+    actions: (await env.DB.prepare(
+      'SELECT DISTINCT action FROM audit_log ORDER BY action',
+    ).all()).results?.map((r) => r.action) ?? [],
+  });
 }

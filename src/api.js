@@ -46,6 +46,7 @@ export const api = {
   reference:   ()               => call('/reference'),
   fonts:       ()               => call('/fonts'),
   numbering:   ()               => call('/numbering'),
+  audit:       (params = '')    => call(`/audit${params}`),
   ssoConfig:   ()               => call('/sso-config'),
   saveSsoConfig: (c)            => call('/sso-config', { method: 'PUT', body: c }),
   deleteFont:  (key)            => call(`/fonts/${key}`, { method: 'DELETE' }),
