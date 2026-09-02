@@ -37,6 +37,13 @@ compatibility_date = "2026-01-15"
 [assets]
 directory = "./dist"
 binding = "ASSETS"
+# Assets normally bypass the Worker, which means the redirect to HTTPS in
+# worker.js never runs for the HTML page itself — the one request where it
+# matters most, because the page's origin decides whether the Secure session
+# cookie can be stored at all. Running the Worker first costs one invocation
+# per asset request; there are four of them.
+run_worker_first = true
+
 
 [[d1_databases]]
 binding = "DB"

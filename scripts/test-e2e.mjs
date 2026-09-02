@@ -1742,6 +1742,29 @@ check('a malformed Access token -> 401', r.status === 401 && body.error === 'bad
 r = await raw('/api/auth/sso', { 'Cf-Access-Jwt-Assertion': 'a.b' });
 check('a two-segment token is rejected', r.status === 401, String(r.status));
 
+// Plain HTTP must never be served. The session cookie is Secure, so a browser
+// on an http:// origin silently discards it: sign-in returns 200, nothing is
+// stored, and the next call is 401. A login that reports success and leaves
+// you signed out, with no error to explain it.
+r = await worker.fetch(new Request('http://app.test/api/auth/methods'), env, {});
+check('http:// is redirected, not served', r.status === 301, String(r.status));
+check('the redirect goes to the same URL over https',
+  r.headers.get('location') === 'https://app.test/api/auth/methods',
+  r.headers.get('location'));
+
+// Cloudflare terminates TLS, so the Worker's own URL can say https while the
+// browser used http. CF-Visitor is what actually knows.
+r = await worker.fetch(new Request('https://app.test/api/auth/methods', {
+  headers: { 'cf-visitor': '{"scheme":"http"}' } }), env, {});
+check('CF-Visitor http is redirected even when the URL says https',
+  r.status === 301, String(r.status));
+
+r = await raw('/api/auth/methods');
+check('https is served normally', r.status === 200, String(r.status));
+check('and carries HSTS so the redirect is needed only once',
+  /max-age=\d+/.test(r.headers.get('strict-transport-security') || ''),
+  r.headers.get('strict-transport-security'));
+
 // A session cookie is attacker-controlled input, and a stale one after a
 // secret rotation is corrupt rather than merely wrong. Every shape of rubbish
 // must come back 401. These all used to 500: the base64 decode of the

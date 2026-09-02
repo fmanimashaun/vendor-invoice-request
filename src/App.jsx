@@ -55,6 +55,7 @@ export default function App() {
   const [context, setContext] = useState(null);   // active role context
   const [loading, setLoading] = useState(true);
   const [fatal, setFatal]     = useState(null);
+  const [notice, setNotice]   = useState(null);   // shown on the login screen
 
   const load = useCallback(async () => {
     const b = await api.bootstrap();
@@ -87,6 +88,36 @@ export default function App() {
     })();
   }, [load]);
 
+  // Entering the app after signing in or changing a password.
+  //
+  // Both callers used to run `setLoading(true); await load(); setLoading(false)`
+  // bare. A throw skipped the last line, and the screen sat on "Loading…"
+  // forever — the Login component whose catch would have shown the error had
+  // already been unmounted by the loading flip, so nothing surfaced and there
+  // was no way back. Anything that sets loading must clear it in a finally.
+  const enter = useCallback(async () => {
+    setLoading(true); setFatal(null); setNotice(null);
+    try {
+      const b = await load();
+      const ctx = b.user.context;
+      setContext(ctx);
+      setTab(firstTab(b.user, ctx));
+    } catch (err) {
+      // 401 straight after a successful sign-in means the session did not
+      // stick rather than that the password was wrong. Put them back on the
+      // form with an explanation instead of stranding them.
+      if (err instanceof ApiError && err.status === 401) {
+        setBoot(null);
+        setNotice('Signed in, but the session did not carry over. Check that '
+          + 'cookies are allowed for this site, then try again.');
+      } else {
+        setFatal(err?.message || 'Could not load.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [load]);
+
   const refresh = useCallback(async () => {
     try {
       const { requests: rs } = await api.requests();
@@ -95,28 +126,23 @@ export default function App() {
   }, []);
 
   if (loading) return <Centre>Loading…</Centre>;
-  if (fatal)   return <Centre><span style={{ color: T.red }}>{fatal}</span></Centre>;
+  if (fatal) return (
+    <Centre>
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ color: T.red, marginBottom: 14 }}>{fatal}</div>
+        <button onClick={() => window.location.reload()} style={button('ghost')}>
+          Try again
+        </button>
+      </div>
+    </Centre>
+  );
   // An admin has just set this password, so the admin knows it. Nothing else
   // is reachable until the owner replaces it — the server enforces that too.
   if (boot?.mustChangePassword) {
-    return <ChangePassword hint={boot.passwordHint} onDone={async () => {
-      setLoading(true);
-      const b = await load();
-      const ctx = b.user.context;
-      setContext(ctx);
-      setTab(firstTab(b.user, ctx));
-      setLoading(false);
-    }} />;
+    return <ChangePassword hint={boot.passwordHint} onDone={enter} />;
   }
 
-  if (!boot)   return <Login onDone={async () => {
-    setLoading(true);
-    const b = await load();
-    const ctx = b.user.context;
-    setContext(ctx);
-    setTab(firstTab(b.user, ctx));
-    setLoading(false);
-  }} />;
+  if (!boot)   return <Login onDone={enter} notice={notice} />;
 
   const { user } = boot;
   const isVendor = user.org === 'vendor';
@@ -273,7 +299,7 @@ function ChangePassword({ hint, onDone }) {
           own before carrying on.
         </p>
         <Card>
-          <Banner onClose={() => setError(null)}>{error}</Banner>
+          <Banner onClose={() => setError(null)}>{error || notice}</Banner>
           <form onSubmit={submit}>
             <Field label="Current password">
               <input style={inputStyle} type="password" autoFocus value={current}
@@ -305,7 +331,7 @@ const Centre = ({ children }) => (
  * Only vendor staff see this. client staff arrive already authenticated by
  * Cloudflare Access, so bootstrap succeeds and this never renders for them.
  */
-function Login({ onDone }) {
+function Login({ onDone, notice }) {
   // Which methods this deployment offers. Until it loads, show nothing rather
   // than flashing a button that may not apply.
   const [methods, setMethods] = useState(null);

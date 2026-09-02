@@ -70,9 +70,42 @@ const json = (data, status = 200, headers = {}) =>
 const fail = (code, message, status = 400, extra = {}) =>
   json({ error: code, message, ...extra }, status);
 
+/**
+ * Is this request reaching us over plain HTTP?
+ *
+ * Behind Cloudflare the Worker's own URL is not always the client's scheme, so
+ * ask CF-Visitor first — it carries what the browser actually used — and fall
+ * back to the URL for a direct hit or a local run.
+ */
+function isInsecure(request, url) {
+  try {
+    const v = request.headers.get('cf-visitor');
+    if (v) return JSON.parse(v).scheme === 'http';
+  } catch { /* malformed header: fall through to the URL */ }
+  return url.protocol === 'http:';
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // Serve nothing over plain HTTP.
+    //
+    // The session cookie is `Secure`, so a browser on an http:// origin
+    // DISCARDS it without a word. Sign-in then returns 200, no cookie is
+    // stored, and the very next call comes back 401 — a login that reports
+    // success and gets you nowhere, with no error anywhere to explain it.
+    // That is not a theoretical failure; it is what a user hit, and it cost
+    // an afternoon to find because every layer looked healthy on its own.
+    //
+    // Cloudflare's "Always Use HTTPS" does the same job one layer earlier and
+    // is worth turning on, but it is a per-zone dashboard setting that a
+    // fresh deployment of this repo will not have. The guarantee belongs in
+    // the app.
+    if (isInsecure(request, url) && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+      url.protocol = 'https:';
+      return new Response(null, { status: 301, headers: { Location: url.toString() } });
+    }
 
     if (!url.pathname.startsWith('/api/')) {
       // Static SPA assets.
@@ -80,7 +113,12 @@ export default {
     }
 
     try {
-      return await route(request, env, url);
+      const res = await route(request, env, url);
+      // Tell the browser never to try http:// for this host again, so the
+      // redirect above is needed once rather than on every visit.
+      const out = new Response(res.body, res);
+      out.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      return out;
     } catch (err) {
       console.error('unhandled', err?.stack || err);
       return fail('server_error', 'Something went wrong.', 500);
