@@ -210,8 +210,14 @@ async function route(request, env, url) {
     return withdrawRequest(env, me, +m[1]);
   if ((m = path.match(/^\/api\/requests\/(\d+)\/approve$/)) && method === 'POST')
     return approveRequest(env, me, +m[1]);
-  if ((m = path.match(/^\/api\/requests\/(\d+)\/reject$/)) && method === 'POST')
-    return rejectRequest(request, env, me, +m[1]);
+  if ((m = path.match(/^\/api\/requests\/(\d+)\/claim$/)) && method === 'POST')
+    return claimRequest(env, me, +m[1]);
+  if ((m = path.match(/^\/api\/requests\/(\d+)\/return$/)) && method === 'POST')
+    return returnRequest(request, env, me, +m[1]);
+  if ((m = path.match(/^\/api\/requests\/(\d+)\/decline$/)) && method === 'POST')
+    return declineRequest(request, env, me, +m[1]);
+  if ((m = path.match(/^\/api\/requests\/(\d+)$/)) && method === 'PUT')
+    return reviseRequest(request, env, me, +m[1]);
 
   if (path === '/api/invoices' && method === 'GET') return listInvoices(env, me);
   if ((m = path.match(/^\/api\/invoices\/(.+)\/pdf$/)) && method === 'GET')
@@ -697,7 +703,7 @@ async function summary(env, me, url) {
   // the totals rather than on a different screen.
   const [pending] = await one(
     `SELECT COUNT(*) AS count, COALESCE(SUM(amount_kobo), 0) AS amount_kobo
-       FROM requests WHERE status = 'pending'`);
+       FROM requests WHERE status = 'pending'`);   // unclaimed only
 
   const ref = await loadReference(env);
   const label = (rows, fn) => rows.map((r) => ({ ...r, label: fn(r) }));
@@ -1696,7 +1702,11 @@ async function listRequests(request, env, me, url) {
       binds.push(me.id);
     }
   } else {
-    clauses.push("(r.status = 'pending' OR r.decided_vendor_id = ?)");
+    // The shared queue, plus everything this vendor has taken. A claim
+    // removes a request from every other vendor's sight for good, so
+    // claimed_vendor_id is the scope -- decided_vendor_id would only reveal it
+    // after a decision, and would hide a vendor's own in-progress work.
+    clauses.push("(r.status = 'pending' OR r.claimed_vendor_id = ?)");
     binds.push(me.vendor_id);
   }
   if (status) {
@@ -2017,50 +2027,266 @@ async function nextRequestRef(env) {
   return `REQ-${String((row?.n ?? 0) + 1).padStart(6, '0')}`;
 }
 
+/**
+ * The requester pulls their own request.
+ *
+ * Allowed while it is unclaimed, while a vendor is holding it, and after it
+ * has been sent back. A claim cannot be released to another vendor -- that is
+ * the whole point -- but the person who raised the request must always be able
+ * to cancel it, or a vendor that claims something and then goes quiet freezes
+ * it forever with nobody able to act. This is the only way out of `claimed`
+ * that is not the claiming vendor's decision, and it ends the request rather
+ * than passing it on.
+ */
 async function withdrawRequest(env, me, id) {
   const denied = requireOrg(me, 'client') || requireRole(me, 'member');
   if (denied) return denied;
 
+  const before = await env.DB.prepare(
+    'SELECT request_ref, status FROM requests WHERE id = ?1 AND created_by = ?2',
+  ).bind(id, me.id).first();
+
   const r = await env.DB.prepare(
     `UPDATE requests SET status = 'withdrawn'
-      WHERE id = ?1 AND created_by = ?2 AND status = 'pending'`,
+      WHERE id = ?1 AND created_by = ?2
+        AND status IN ('pending','claimed','returned')`,
   ).bind(id, me.id).run();
 
-  if (!r.meta.changes) return fail('conflict', 'Only your own pending requests can be withdrawn.', 409);
-  const w = await env.DB.prepare('SELECT request_ref FROM requests WHERE id = ?1').bind(id).first();
+  if (!r.meta.changes) {
+    return fail('conflict',
+      'Only your own requests can be withdrawn, and only before a decision.', 409);
+  }
   await audit(env, me, 'REQUEST_WITHDRAWN', {
-    entity: `request:${id}`, label: w?.request_ref,
-    summary: `${w?.request_ref ?? `Request ${id}`} withdrawn by the requester`,
-    before: { status: 'pending' }, after: { status: 'withdrawn' },
+    entity: `request:${id}`, label: before?.request_ref,
+    summary: `${before?.request_ref ?? `Request ${id}`} withdrawn by the requester`
+      + (before?.status === 'claimed' ? ' while a vendor was holding it' : ''),
+    before: { status: before?.status }, after: { status: 'withdrawn' },
   });
   return json({ ok: true });
 }
 
-async function rejectRequest(request, env, me, id) {
+/**
+ * The requester fixes a returned request and sends it back.
+ *
+ * Deliberately narrow. Only the fields a vendor plausibly sent it back over --
+ * the money, the meter or router it is against, and the description -- can
+ * change. Not the business unit, the site, the period or the request type,
+ * because those decide the invoice reference and the duplicate guard: letting
+ * a returned request drift onto a different site or month would let one
+ * request quietly become a different one, keeping its number and its history.
+ * If those are wrong, it is a new request.
+ *
+ * It goes straight back to the vendor that returned it, never to the shared
+ * queue. They already know the history; starting again with someone else
+ * wastes the conversation that produced the correction.
+ */
+async function reviseRequest(request, env, me, id) {
+  const denied = requireOrg(me, 'client') || requireRole(me, 'member');
+  if (denied) return denied;
+
+  const before = await env.DB.prepare(
+    'SELECT * FROM requests WHERE id = ?1 AND created_by = ?2',
+  ).bind(id, me.id).first();
+  if (!before) return fail('not_found', 'No such request of yours.', 404);
+  if (before.status !== 'returned') {
+    return fail('conflict',
+      before.status === 'claimed'
+        ? 'A vendor is looking at this. You can withdraw it, but not edit it.'
+        : `That request is ${before.status} and cannot be edited.`, 409);
+  }
+
+  const b = await request.json().catch(() => ({}));
+  const errors = [];
+  const type = typeFor(before.type_code);
+
+  const amount_kobo = Number(b.amount_kobo);
+  if (!Number.isInteger(amount_kobo) || amount_kobo <= 0) {
+    errors.push('Amount must be a positive whole number of kobo.');
+  }
+
+  let asset_key = before.asset_key;
+  if (type?.extraField) {
+    asset_key = String(b.asset_key ?? before.asset_key ?? '').trim();
+    if (!asset_key) errors.push(`${type.extraField.label} is required.`);
+  }
+
+  const description = String(b.description ?? before.description ?? '').trim();
+  if (!description) errors.push('Description is required.');
+
+  if (errors.length) return fail('validation_failed', errors.join(' '), 422, { errors });
+
+  const fee_kobo = before.fee_kobo;
+  try {
+    await env.DB.prepare(
+      `UPDATE requests
+          SET amount_kobo = ?2, total_kobo = ?3, asset_key = ?4, description = ?5,
+              status = 'claimed', return_reason = NULL
+        WHERE id = ?1 AND status = 'returned'`,
+    ).bind(id, amount_kobo, amount_kobo + fee_kobo, asset_key, description).run();
+  } catch (e) {
+    // The duplicate guards cover claimed and returned rows, so an edit can
+    // collide with a different live request the same way a new one can.
+    if (String(e).includes('UNIQUE')) {
+      return fail('duplicate_period',
+        'Those details now match another live request for the same period.', 409);
+    }
+    throw e;
+  }
+
+  const after = await env.DB.prepare('SELECT * FROM requests WHERE id = ?1').bind(id).first();
+  await audit(env, me, 'REQUEST_REVISED', {
+    entity: `request:${id}`, label: before.request_ref,
+    summary: `${before.request_ref} corrected and returned to the vendor`
+      + (before.amount_kobo !== amount_kobo
+        ? ` — amount ${naira(before.amount_kobo)} to ${naira(amount_kobo)}` : ''),
+    before: {
+      amount_kobo: before.amount_kobo, asset_key: before.asset_key,
+      description: before.description, status: 'returned',
+    },
+    after: {
+      amount_kobo, asset_key, description, status: 'claimed',
+    },
+  });
+  return json({ request: after });
+}
+
+/**
+ * A vendor takes a request out of the shared queue.
+ *
+ * One-way. It leaves every other vendor's queue permanently and cannot be
+ * released, so from here the request has to end with this vendor -- approved
+ * or declined. Sending it back to the requester to fix keeps it here too.
+ *
+ * The UPDATE is conditional on the status still being 'pending', which is what
+ * settles a race: two vendors clicking at once both issue this, one changes a
+ * row and the other changes nothing and is told who got there first. Checking
+ * first and then writing would let both through.
+ */
+async function claimRequest(env, me, id) {
   const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver');
   if (denied) return denied;
 
-  const { reason } = await request.json().catch(() => ({}));
-  if (!reason || String(reason).trim().length < 3) {
-    return fail('bad_request', 'A reason is required when rejecting.');
-  }
-
   const r = await env.DB.prepare(
     `UPDATE requests
-        SET status = 'rejected', decided_by = ?2, decided_vendor_id = ?4,
-            decided_at = datetime('now'), reject_reason = ?3
+        SET status = 'claimed', claimed_vendor_id = ?2,
+            claimed_by = ?3, claimed_at = datetime('now')
       WHERE id = ?1 AND status = 'pending'`,
+  ).bind(id, me.vendor_id, me.id).run();
+
+  if (!r.meta.changes) {
+    const row = await env.DB.prepare(
+      `SELECT r.status, v.name AS vendor FROM requests r
+         LEFT JOIN vendors v ON v.id = r.claimed_vendor_id WHERE r.id = ?1`,
+    ).bind(id).first();
+    if (!row) return fail('not_found', 'No such request.', 404);
+    return fail('already_claimed',
+      row.claimed_vendor_id === me.vendor_id
+        ? 'You already have this one.'
+        : `${row.vendor || 'Another vendor'} took this one first.`,
+      409, { status: row.status });
+  }
+
+  const row = await env.DB.prepare(
+    'SELECT * FROM requests WHERE id = ?1').bind(id).first();
+  await audit(env, me, 'REQUEST_CLAIMED', {
+    entity: `request:${id}`, label: row?.request_ref,
+    summary: `${row?.request_ref} claimed — it is now this vendor's to approve or decline`,
+    before: { status: 'pending' }, after: { status: 'claimed' },
+  });
+  return json({ request: row });
+}
+
+/** Shared guard: this request must be mine to act on. */
+async function heldByMe(env, me, id) {
+  const row = await env.DB.prepare(
+    'SELECT * FROM requests WHERE id = ?1').bind(id).first();
+  if (!row) return { error: fail('not_found', 'No such request.', 404) };
+  // 404 rather than 403 for another vendor's request: a vendor should not learn
+  // what is in someone else's pipeline.
+  if (row.claimed_vendor_id && row.claimed_vendor_id !== me.vendor_id) {
+    return { error: fail('not_found', 'No such request.', 404) };
+  }
+  if (!row.claimed_vendor_id) {
+    return { error: fail('not_claimed',
+      'Claim this request before acting on it.', 409) };
+  }
+  return { row };
+}
+
+/**
+ * Sent back to the requester to fix something.
+ *
+ * Not a decision, so it stays this vendor's: the requester corrects it and it
+ * comes back to the people who already know the history, not to the back of a
+ * shared queue. Nothing is issued and no number is taken.
+ */
+async function returnRequest(request, env, me, id) {
+  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver');
+  if (denied) return denied;
+
+  // Whether this is yours to act on comes first. Complaining about the reason
+  // when the real problem is that you have not claimed it sends the reader off
+  // to fix the wrong thing.
+  const held = await heldByMe(env, me, id);
+  if (held.error) return held.error;
+  if (held.row.status !== 'claimed') {
+    return fail('conflict', `That request is ${held.row.status}, not awaiting a decision.`, 409);
+  }
+
+  const { reason } = await request.json().catch(() => ({}));
+  if (!reason || String(reason).trim().length < 3) {
+    return fail('bad_request', 'Say what needs fixing — the requester only has this to go on.');
+  }
+
+  await env.DB.prepare(
+    `UPDATE requests SET status = 'returned', return_reason = ?2 WHERE id = ?1`,
+  ).bind(id, String(reason).trim()).run();
+
+  await audit(env, me, 'REQUEST_RETURNED', {
+    entity: `request:${id}`, label: held.row.request_ref,
+    summary: `${held.row.request_ref} sent back to the requester: ${String(reason).trim()}`,
+    before: { status: 'claimed' },
+    after: { status: 'returned', return_reason: String(reason).trim() },
+  });
+  return json({ ok: true });
+}
+
+/**
+ * The vendor says no, and that is the end of it.
+ *
+ * Terminal for everyone: no other vendor gets a turn, because no other vendor
+ * ever saw it after the claim. The requester raises a fresh request if the
+ * spend is still needed, which is why the duplicate guards treat a declined
+ * request as having freed its period.
+ */
+async function declineRequest(request, env, me, id) {
+  const denied = requireOrg(me, 'vendor') || requireRole(me, 'approver');
+  if (denied) return denied;
+
+  const held = await heldByMe(env, me, id);
+  if (held.error) return held.error;
+  if (!['claimed', 'returned'].includes(held.row.status)) {
+    return fail('conflict', `That request is already ${held.row.status}.`, 409);
+  }
+
+  const { reason } = await request.json().catch(() => ({}));
+  if (!reason || String(reason).trim().length < 3) {
+    return fail('bad_request', 'A reason is required when declining.');
+  }
+
+  await env.DB.prepare(
+    `UPDATE requests
+        SET status = 'declined', decided_by = ?2, decided_vendor_id = ?4,
+            decided_at = datetime('now'), decline_reason = ?3
+      WHERE id = ?1`,
   ).bind(id, me.id, String(reason).trim(), me.vendor_id).run();
 
-  if (!r.meta.changes) return fail('conflict', 'That request is no longer pending.', 409);
-  const rej = await env.DB.prepare('SELECT request_ref FROM requests WHERE id = ?1').bind(id).first();
-  // A rejection is terminal for every vendor, not just this one, so who did it
-  // and why is the whole record of why a payment did not happen.
-  await audit(env, me, 'REQUEST_REJECTED', {
-    entity: `request:${id}`, label: rej?.request_ref,
-    summary: `${rej?.request_ref ?? `Request ${id}`} rejected: ${String(reason).trim()}`,
-    before: { status: 'pending' },
-    after: { status: 'rejected', reject_reason: String(reason).trim() },
+  await audit(env, me, 'REQUEST_DECLINED', {
+    entity: `request:${id}`, label: held.row.request_ref,
+    summary: `${held.row.request_ref} declined: ${String(reason).trim()}`
+      + ' — terminal, the requester must raise a new one',
+    before: { status: held.row.status },
+    after: { status: 'declined', decline_reason: String(reason).trim() },
   });
   return json({ ok: true });
 }
@@ -2113,7 +2339,17 @@ async function approveRequest(env, me, id) {
 
   const req = await env.DB.prepare('SELECT * FROM requests WHERE id = ?1').bind(id).first();
   if (!req) return fail('not_found', 'No such request.', 404);
-  if (req.status !== 'pending') return fail('conflict', `Request is already ${req.status}.`, 409);
+  // Approving is now the end of a claim, not a grab from the pool. A request
+  // has to be claimed first, which is what guarantees exactly one vendor was
+  // ever accountable for it.
+  if (req.status !== 'claimed') {
+    return fail('conflict', req.status === 'pending'
+      ? 'Claim this request before approving it.'
+      : `Request is ${req.status}.`, 409);
+  }
+  if (req.claimed_vendor_id !== me.vendor_id) {
+    return fail('not_found', 'No such request.', 404);
+  }
   if (req.created_by === me.id) {
     return fail('forbidden', 'You cannot approve a request you raised.', 403);
   }
@@ -2210,7 +2446,7 @@ async function approveRequest(env, me, id) {
           `UPDATE requests
               SET status = 'approved', decided_by = ?2, decided_vendor_id = ?3,
                   decided_at = datetime('now')
-            WHERE id = ?1 AND status = 'pending'`,
+            WHERE id = ?1 AND status = 'claimed'`,
         ).bind(req.id, me.id, me.vendor_id),
       ]);
 
@@ -2515,7 +2751,10 @@ export function diff(before, after) {
   return Object.keys(a).length ? { before: b, after: a } : null;
 }
 
-export const GENESIS = 'GENESIS';
+// Not exported: workerd validates every export of the entry module as a
+// handler or class, and a string here stops the Worker from starting at all —
+// locally under `wrangler dev` and in production alike. Nothing imports it.
+const GENESIS = 'GENESIS';
 const AUDIT_HEAD_KEY = 'audit/head';
 
 const sha256Hex = async (text) => {

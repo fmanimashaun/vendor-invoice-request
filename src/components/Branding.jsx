@@ -27,7 +27,7 @@ const readAsDataUri = (file) => new Promise((res, rej) => {
   fr.readAsDataURL(file);
 });
 
-export default function Branding({ orgName, logo, favicon, onSaved }) {
+export default function Branding({ orgName, feeKobo, logo, favicon, onSaved }) {
   const [busy, setBusy]   = useState(null);
   const [error, setError] = useState(null);
   const [ok, setOk]       = useState(null);
@@ -35,7 +35,8 @@ export default function Branding({ orgName, logo, favicon, onSaved }) {
   async function put(field, value) {
     setError(null); setOk(null); setBusy(field);
     try {
-      const { config } = await api.savePlatformConfig({ [field]: value });
+      // The route insists on the fee every time; send the current one unchanged.
+      const { config } = await api.savePlatformConfig({ [field]: value, default_fee_kobo: feeKobo ?? 0 });
       onSaved?.(config);
       setOk(value ? 'Saved. Reload to see it in the browser tab.' : 'Removed.');
     } catch (err) {

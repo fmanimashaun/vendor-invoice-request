@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { T, input as inputStyle } from '../theme.js';
-import { Card, Field, Banner, Status, button } from './Shell.jsx';
+import { T, MONO, input as inputStyle } from '../theme.js';
+import {
+  Card, Field, Banner, Status, Modal, SuccessState, Details, PageHeader, button,
+} from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import { PASSWORD_HINT, MIN_LENGTH } from '../../shared/password.js';
 
@@ -22,98 +24,112 @@ import { PASSWORD_HINT, MIN_LENGTH } from '../../shared/password.js';
  * a change at next sign-in.
  */
 export default function Account({ me, acting }) {
+  const [changing, setChanging] = useState(false);
+
+  return (
+    <>
+      <PageHeader
+        title="Account"
+        description="Your name and email are maintained by an administrator. Your name is printed on documents you approve, so it is not yours to edit — ask an administrator if either is wrong."
+      />
+
+      <Card title="Your details">
+        <Details rows={[
+          ['Name', me.full_name],
+          ['Email', <span style={{ fontFamily: MONO, fontSize: 13 }}>{me.email}</span>],
+          me.job_title && ['Job title', me.job_title],
+          me.phone && ['Phone', me.phone],
+          ['Organisation', me.org === 'vendor' ? (me.vendor_name || 'Vendor') : 'Client'],
+          ['Roles', (
+            <span>
+              <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
+                {(me.roles || []).map((r) => <Status key={r} value={r} color={r === 'admin' ? T.blue : T.textDim} />)}
+              </span>
+              {(me.roles || []).length > 1 && (
+                <div style={{ fontSize: 12, color: T.textDim, marginTop: 6 }}>
+                  Acting as {acting}. Switch in the header.
+                </div>
+              )}
+            </span>
+          )],
+        ]} />
+      </Card>
+
+      <Card
+        title="Password"
+        subtitle="You need your current password to set a new one, so an unattended session cannot be used to take the account over. If you have forgotten it, an administrator can set a temporary one — there is no email recovery."
+        right={<button onClick={() => setChanging(true)} style={button('ghost', false, 'sm')}>Change password</button>}
+      />
+
+      {changing && <ChangePasswordModal onClose={() => setChanging(false)} />}
+    </>
+  );
+}
+
+function ChangePasswordModal({ onClose }) {
   const [current, setCurrent] = useState('');
   const [next, setNext]       = useState('');
   const [again, setAgain]     = useState('');
   const [busy, setBusy]       = useState(false);
   const [error, setError]     = useState(null);
-  const [ok, setOk]           = useState(null);
+  const [done, setDone]       = useState(false);
 
   const mismatch = again.length > 0 && next !== again;
   const ready = current && next.length >= MIN_LENGTH && next === again && !busy;
 
   async function submit(e) {
     e.preventDefault();
-    setError(null); setOk(null); setBusy(true);
+    setError(null); setBusy(true);
     try {
       await api.changePassword(current, next);
-      setCurrent(''); setNext(''); setAgain('');
-      setOk('Your password has been changed.');
+      setDone(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
     } finally { setBusy(false); }
   }
 
-  const Row = ({ label, children }) => (
-    <div style={{ display: 'flex', gap: 14, padding: '9px 0', borderBottom: `1px solid ${T.border}22` }}>
-      <div style={{
-        width: 130, flexShrink: 0, fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
-        color: T.textDim, textTransform: 'uppercase', paddingTop: 2,
-      }}>{label}</div>
-      <div style={{ minWidth: 0 }}>{children}</div>
-    </div>
-  );
+  if (done) {
+    return (
+      <Modal title="Password changed" onClose={onClose} size="sm"
+        actions={<button onClick={onClose} style={button('primary')}>Done</button>}>
+        <SuccessState title="Your password has been changed">
+          Use the new one next time you sign in. Nobody else knows it.
+        </SuccessState>
+      </Modal>
+    );
+  }
 
   return (
-    <>
-      <Card title="Your details">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Your name and email are maintained by an administrator. Your name is
-          printed on documents you approve, so it is not yours to edit — ask an
-          administrator if either is wrong.
-        </p>
-        <Row label="Name">{me.full_name}</Row>
-        <Row label="Email"><span style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-        }}>{me.email}</span></Row>
-        {me.job_title && <Row label="Job title">{me.job_title}</Row>}
-        {me.phone && <Row label="Phone">{me.phone}</Row>}
-        <Row label="Organisation">
-          {me.org === 'vendor' ? (me.vendor_name || 'Vendor') : 'Client'}
-        </Row>
-        <Row label="Roles">
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {(me.roles || []).map((r) => <Status key={r} value={r} />)}
-          </div>
-          {(me.roles || []).length > 1 && (
-            <div style={{ fontSize: 12, color: T.textDim, marginTop: 6 }}>
-              Acting as {acting}. Switch in the header.
-            </div>
-          )}
-        </Row>
-      </Card>
-
-      <Card title="Change your password">
-        <Banner onClose={() => setError(null)}>{error}</Banner>
-        <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
-          You need your current password to set a new one. That is deliberate:
-          it means an unattended session cannot be used to take the account
-          over. If you have forgotten it, an administrator can set a temporary
-          one — there is no email recovery.
-        </p>
-        <form onSubmit={submit} style={{ maxWidth: 420 }}>
-          <Field label="Current password">
-            <input style={inputStyle} type="password" autoComplete="current-password"
-                   value={current} onChange={(e) => setCurrent(e.target.value)} />
-          </Field>
-          <Field label="New password" hint={PASSWORD_HINT}>
-            <input style={inputStyle} type="password" autoComplete="new-password"
-                   value={next} onChange={(e) => setNext(e.target.value)} />
-          </Field>
-          <Field label="New password again"
-                 hint={mismatch ? 'These do not match.' : undefined}>
-            <input style={{
-              ...inputStyle,
-              borderColor: mismatch ? T.red : inputStyle.border?.split(' ').pop(),
-            }} type="password" autoComplete="new-password"
-                   value={again} onChange={(e) => setAgain(e.target.value)} />
-          </Field>
-          <button type="submit" disabled={!ready} style={button('primary', !ready)}>
+    <Modal
+      title="Change your password"
+      onClose={onClose}
+      size="sm"
+      locked={busy}
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="change-password" disabled={!ready} style={button('primary', !ready)}>
             {busy ? 'Saving…' : 'Change password'}
           </button>
-        </form>
-      </Card>
-    </>
+        </>
+      }
+    >
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="change-password" onSubmit={submit}>
+        <Field label="Current password">
+          <input style={inputStyle} type="password" autoComplete="current-password" autoFocus
+                 value={current} onChange={(e) => setCurrent(e.target.value)} />
+        </Field>
+        <Field label="New password" hint={PASSWORD_HINT}>
+          <input style={inputStyle} type="password" autoComplete="new-password"
+                 value={next} onChange={(e) => setNext(e.target.value)} />
+        </Field>
+        <Field label="New password again" error={mismatch ? 'These do not match.' : undefined} style={{ marginBottom: 0 }}>
+          <input style={{ ...inputStyle, borderColor: mismatch ? T.red : undefined }}
+                 type="password" autoComplete="new-password"
+                 value={again} onChange={(e) => setAgain(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
   );
 }

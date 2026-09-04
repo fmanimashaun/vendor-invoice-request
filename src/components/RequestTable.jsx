@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { T, FONT, input as inputStyle } from '../theme.js';
-import { Card, Table, Td, Status, button } from './Shell.jsx';
+import { Card, Table, Tr, Td, Status, button } from './Shell.jsx';
 import { naira } from '../../shared/reference.js';
 
 /**
@@ -157,6 +157,9 @@ export function RequestTableView({
   loading = false,
   empty,
   resetKey,
+  // Optional. Given, it adds a trailing column; a row the caller has nothing
+  // to offer on renders an empty cell rather than a gap in the table.
+  actions,
 }) {
   const [sort, setSort] = useState(defaultSort);
   const [page, setPage] = useState(1);
@@ -180,6 +183,7 @@ export function RequestTableView({
   useEffect(() => { if (page > pages) setPage(1); }, [page, pages]);
   const rows = sorted.slice((page - 1) * pageSize, page * pageSize);
 
+  const cols = actions ? [...columns, '__actions'] : columns;
   const head = columns.map((k) => {
     const c = ALL_COLUMNS[k];
     return {
@@ -201,6 +205,7 @@ export function RequestTableView({
       ),
     };
   });
+  if (actions) head.push({ label: '', right: true });
 
   const cell = (key, r) => {
     switch (key) {
@@ -220,9 +225,9 @@ export function RequestTableView({
       case 'status':      return (
         <Td key={key}>
           <Status value={r.status} />
-          {r.status === 'rejected' && r.reject_reason && (
+          {(r.decline_reason || r.return_reason) && (
             <div style={{ fontSize: 12, color: T.textDim, marginTop: 4, maxWidth: 220 }}>
-              {r.reject_reason}
+              {r.decline_reason || r.return_reason}
             </div>
           )}
           {(r.ack_flags || []).length > 0 && (
@@ -246,7 +251,18 @@ export function RequestTableView({
         <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>{note}</p>
       )}
       <Table head={head} loading={loading} empty={empty}>
-        {rows.map((r) => <tr key={r.id}>{columns.map((k) => cell(k, r))}</tr>)}
+        {rows.map((r) => (
+          <Tr key={r.id}>
+            {columns.map((k) => cell(k, r))}
+            {actions && (
+              <Td right>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  {actions(r)}
+                </div>
+              </Td>
+            )}
+          </Tr>
+        ))}
       </Table>
       {sorted.length > 0 && (
         <div style={{
@@ -273,7 +289,7 @@ export function RequestTableView({
   );
 }
 
-export const emptyFor = (total, clear) => (total
+export const emptyFor = (total, clear, onNew) => (total
   ? {
       title: 'Nothing matches those filters',
       hint: 'Try a wider date range, or clear the filters to see everything.',
@@ -283,12 +299,14 @@ export const emptyFor = (total, clear) => (total
       title: 'No requests yet',
       hint: 'Raised requests appear here with their status, and their invoice '
         + 'number once a vendor has issued one.',
+      action: onNew && <button onClick={onNew} style={button('primary')}>Raise your first request</button>,
     });
 
 /** Self-contained: its own filters, its own table. Used by the request list. */
 export default function RequestTable({
   requests, title, columns = FULL, pageSize = 25,
-  defaultStatus = '', defaultSort, showVendorFilter = true, loading = false,
+  defaultStatus = '', defaultSort, showVendorFilter = true, loading = false, onNew,
+  actions,
 }) {
   const f = useRequestFilters(requests, { defaultStatus });
   const total = f.filtered.reduce((n, r) => n + (r.issued_total_kobo ?? r.total_kobo ?? 0), 0);
@@ -309,8 +327,9 @@ export default function RequestTable({
             : `${f.filtered.length} of ${requests.length}`} · {naira(total)}
         </span>
       }
+      actions={actions}
       note={<RequestFilters f={f} showVendorFilter={showVendorFilter} />}
-      empty={emptyFor(requests.length, f.clear)}
+      empty={emptyFor(requests.length, f.clear, onNew)}
     />
   );
 }

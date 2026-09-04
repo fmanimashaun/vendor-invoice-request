@@ -249,8 +249,25 @@ CREATE TABLE IF NOT EXISTS fonts (
 CREATE TABLE IF NOT EXISTS requests (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   request_ref   TEXT NOT NULL UNIQUE,          -- REQ-000412; gaps are fine
+  -- pending  -> in the shared queue, unclaimed, visible to every vendor
+  -- claimed  -> taken by ONE vendor; nobody else sees it or can act on it
+  -- returned -> sent back to the requester to fix, still that vendor's
+  -- approved -> invoice issued
+  -- declined -> that vendor said no. Terminal. Nobody else gets a turn.
+  -- withdrawn-> the requester pulled it
+  --
+  -- A claim is one-way. It cannot be released back to the pool and no other
+  -- vendor can take it, so a claimed request has to end with the vendor that
+  -- took it, either approved or declined. That is deliberate: a request that
+  -- can bounce between vendors has no single party accountable for it, and a
+  -- requester chasing an approval needs one name to chase.
+  --
+  -- `returned` therefore stays scoped to the claiming vendor too. The
+  -- requester fixes the error and it goes back to the same people, who already
+  -- know the history, rather than to the back of a shared queue.
   status        TEXT NOT NULL DEFAULT 'pending'
-                  CHECK (status IN ('pending','approved','rejected','withdrawn')),
+                  CHECK (status IN ('pending','claimed','returned',
+                                    'approved','declined','withdrawn')),
 
   bu_code       TEXT NOT NULL,                 -- RFC | REX | RHMO
   site_code     TEXT,                          -- NULL for BU-scope types
@@ -285,7 +302,19 @@ CREATE TABLE IF NOT EXISTS requests (
   -- is what scopes a decided request out of every other vendor's view.
   decided_vendor_id INTEGER REFERENCES vendors(id),
   decided_at    TEXT,
-  reject_reason TEXT,
+  -- Who took it out of the shared queue. Set once, never cleared: this is
+  -- what scopes every later view and action, and clearing it would put the
+  -- request back in play for a vendor that never saw the history.
+  claimed_vendor_id INTEGER REFERENCES vendors(id),
+  claimed_by    INTEGER REFERENCES users(id),
+  claimed_at    TEXT,
+
+  -- Why it was sent back, so the requester can see what to fix. Overwritten
+  -- on a second return; the audit trail keeps every one.
+  return_reason TEXT,
+
+  -- Why it was declined. Terminal, so this is the last word on the request.
+  decline_reason TEXT,
 
   CHECK (total_kobo = amount_kobo + fee_kobo)
 );
@@ -293,6 +322,8 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS ix_requests_status ON requests(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_requests_mine   ON requests(created_by, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_requests_vendor ON requests(decided_vendor_id, created_at DESC);
+-- A vendor's own work, which is scoped by the claim rather than the decision.
+CREATE INDEX IF NOT EXISTS ix_requests_claim  ON requests(claimed_vendor_id, created_at DESC);
 
 -- Duplicate guards. Partial, so a rejected or withdrawn request never blocks a
 -- legitimate resubmission. Scoped to the client side of the request only --
@@ -319,15 +350,15 @@ CREATE INDEX IF NOT EXISTS ix_requests_vendor ON requests(decided_vendor_id, cre
 -- meter number: a typo in the meter would otherwise slip a duplicate through.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_dup_elec
   ON requests(COALESCE(site_code,'-'), period, amount_kobo)
-  WHERE type_code = 'ELEC' AND status IN ('pending','approved');
+  WHERE type_code = 'ELEC' AND status IN ('pending','claimed','returned','approved');
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_dup_router
   ON requests(COALESCE(site_code,'-'), period, COALESCE(asset_key,'-'), amount_kobo)
-  WHERE type_code = 'ROUTER' AND status IN ('pending','approved');
+  WHERE type_code = 'ROUTER' AND status IN ('pending','claimed','returned','approved');
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_dup_staffdc
   ON requests(bu_code, period, amount_kobo)
-  WHERE type_code = 'STAFFDC' AND status IN ('pending','approved');
+  WHERE type_code = 'STAFFDC' AND status IN ('pending','claimed','returned','approved');
 
 -- ── invoices ───────────────────────────────────────────────────────────
 -- Created only on approval, by a vendor user. No row here means no PDF: that

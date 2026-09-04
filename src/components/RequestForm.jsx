@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { T, FONT, input as inputStyle } from '../theme.js';
-import { Card, Field, Banner, button } from './Shell.jsx';
+import { Field, FormGrid, Banner, Modal, SuccessState, button } from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import {
   REQUEST_TYPES, typeFor, siteNameIn, buNameIn, naira, periodLabel,
@@ -17,11 +17,65 @@ function toKobo(text) {
 }
 
 /**
- * `reference` is the live business-unit and site data from /api/bootstrap, not a code
- * constant: the client admin edits locations from Settings, and the form has
- * to follow. Only active rows are sent, so a disabled site cannot be picked.
+ * Raising a request, in a dialog over the list it will appear in.
+ *
+ * Two faces. The form, and — once the server has accepted it — a success
+ * panel that names the request and asks whether to raise another. "Another"
+ * remounts the form blank (the key below), so nothing from the last one leaks
+ * into the next; "Done" closes the dialog onto a list that already shows it.
+ *
+ * `reference` is the live business-unit and site data from /api/bootstrap, not
+ * a code constant: the client admin edits locations from Settings, and the
+ * form has to follow. Only active rows are sent, so a disabled site cannot be
+ * picked.
  */
-export default function RequestForm({ feeKobo, reference, onCreated }) {
+export default function NewRequestModal({ feeKobo, reference, onCreated, onClose }) {
+  const [done, setDone] = useState(null);   // the created request, once there is one
+  const [run, setRun]   = useState(0);      // bumps to remount a blank form
+  const [busy, setBusy] = useState(false);
+
+  function created(request) {
+    setDone(request);
+    onCreated?.();
+  }
+
+  if (done) {
+    return (
+      <Modal title="Request submitted" onClose={onClose} size="sm"
+        actions={
+          <>
+            <button onClick={onClose} style={button('ghost')}>Close</button>
+            <button onClick={() => { setDone(null); setRun((n) => n + 1); }} style={button('primary')}>
+              Raise another request
+            </button>
+          </>
+        }>
+        <SuccessState title={`${done.request_ref} is with the vendors`}>
+          Every onboarded vendor can now see it in their shared queue. Whichever
+          claims it first will approve it and issue the invoice, or send it back
+          if something needs fixing. You can follow it from <strong style={{ color: T.text }}>My requests</strong>.
+          <div style={{ marginTop: 14, fontSize: 15, color: T.text }}>
+            Would you like to raise another one?
+          </div>
+        </SuccessState>
+      </Modal>
+    );
+  }
+
+  return (
+    <RequestFormBody
+      key={run}
+      feeKobo={feeKobo}
+      reference={reference}
+      onCreated={created}
+      onClose={onClose}
+      busy={busy}
+      setBusy={setBusy}
+    />
+  );
+}
+
+function RequestFormBody({ feeKobo, reference, onCreated, onClose, busy, setBusy }) {
   const businessUnits = reference?.businessUnits ?? [];
   const sites = reference?.sites ?? [];
   const buSites = reference?.buSites ?? {};
@@ -34,14 +88,12 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
   const [assetKey, setAsset]  = useState('');
   const [subject, setSubject] = useState('');
   const [description, setDescription] = useState('');
-  const [busy, setBusy]       = useState(false);
   const [error, setError]     = useState(null);
   const [existing, setExisting] = useState(null);
   // Warnings the server raised on the last attempt. Holding them here is what
   // turns a refusal into a confirm step: the same submit re-runs with
   // `confirm: true` and the server records what was overridden.
   const [warnings, setWarnings] = useState([]);
-  const [ok, setOk]           = useState(null);
 
   const type = typeFor(typeCode);
   const permitted = useMemo(
@@ -60,15 +112,19 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
 
   const amountKobo = toKobo(amount);
   const totalKobo = amountKobo == null ? null : amountKobo + feeKobo;
+  const amountBad = amount.trim() !== '' && (amountKobo == null || amountKobo <= 0);
 
   // Suggested description; the user can override it.
   const suggested = needsSite
     ? `${type?.label ?? ''} For ${siteNameIn(reference, siteCode)}`
     : `${type?.label ?? ''} For ${buNameIn(reference, buCode)}`;
 
+  const ready = !busy && amountKobo != null && amountKobo > 0 && buCode && (!needsSite || siteCode)
+    && (!type?.extraField || assetKey.trim());
+
   async function submit(e, confirm = false) {
     e?.preventDefault();
-    setError(null); setExisting(null); setOk(null);
+    setError(null); setExisting(null);
     if (!confirm) setWarnings([]);
 
     if (amountKobo == null || amountKobo <= 0) {
@@ -89,10 +145,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
         description: description.trim() || suggested,
         confirm,
       });
-      setOk(`${request.request_ref} submitted. A vendor will review it.`);
-      setAmount(''); setAsset(''); setDescription(''); setSubject('');
-      setWarnings([]);
-      onCreated?.();
+      onCreated(request);
     } catch (err) {
       if (err instanceof ApiError) {
         // A soft warning is not a dead end: show what the server objected to
@@ -110,12 +163,37 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
     }
   }
 
-  return (
-    <Card title="Raise a payment request">
-      <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
+  const confirming = warnings.length > 0;
 
-      {warnings.length > 0 && (
-        <Banner kind="warn" onClose={() => setWarnings([])}>
+  return (
+    <Modal
+      title="New payment request"
+      subtitle="A vendor approves it and issues the invoice on their own letterhead."
+      onClose={onClose}
+      size="lg"
+      locked={busy}
+      actions={
+        confirming ? (
+          <>
+            <button type="button" onClick={() => setWarnings([])} disabled={busy} style={button('ghost', busy)}>
+              Go back and edit
+            </button>
+            <button type="button" disabled={busy} onClick={() => submit(null, true)} style={button('primary', busy)}>
+              {busy ? 'Submitting…' : 'Confirm and submit anyway'}
+            </button>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+            <button type="submit" form="new-request" disabled={!ready} style={button('primary', !ready)}>
+              {busy ? 'Submitting…' : 'Submit request'}
+            </button>
+          </>
+        )
+      }
+    >
+      {confirming && (
+        <Banner kind="warn">
           <strong>
             {warnings.length === 1 ? 'Check this before submitting'
               : `${warnings.length} things to check before submitting`}
@@ -125,16 +203,6 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
               <li key={w.key} style={{ marginBottom: 4 }}>{w.message}</li>
             ))}
           </ul>
-          <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
-            <button type="button" disabled={busy}
-                    onClick={() => submit(null, true)}
-                    style={button('primary', busy)}>
-              {busy ? 'Submitting…' : 'Confirm and submit anyway'}
-            </button>
-            <button type="button" onClick={() => setWarnings([])} style={button('ghost')}>
-              Go back and edit
-            </button>
-          </div>
           <div style={{ marginTop: 8, fontSize: 12, color: T.textDim }}>
             Confirming is recorded against the request and shown to the reviewer.
           </div>
@@ -151,10 +219,10 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
         )}
       </Banner>
 
-      <form onSubmit={submit}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14 }}>
+      <form id="new-request" onSubmit={submit}>
+        <FormGrid min={210}>
           <Field label="Business unit">
-            <select style={inputStyle} value={buCode} onChange={(e) => changeBu(e.target.value)}>
+            <select style={inputStyle} value={buCode} onChange={(e) => changeBu(e.target.value)} disabled={confirming}>
               {businessUnits.map((b) => (
                 <option key={b.code} value={b.code}>{b.code} — {b.name}</option>
               ))}
@@ -162,7 +230,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
           </Field>
 
           <Field label="Request type">
-            <select style={inputStyle} value={typeCode} onChange={(e) => setType(e.target.value)}>
+            <select style={inputStyle} value={typeCode} onChange={(e) => setType(e.target.value)} disabled={confirming}>
               {REQUEST_TYPES.map((t) => (
                 <option key={t.code} value={t.code}>{t.label}</option>
               ))}
@@ -177,7 +245,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
               <select
                 style={{ ...inputStyle, opacity: siteLocked ? 0.7 : 1 }}
                 value={siteCode}
-                disabled={siteLocked}
+                disabled={siteLocked || confirming}
                 onChange={(e) => setSite(e.target.value)}
               >
                 {permitted.map((s) => (
@@ -196,6 +264,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
               style={inputStyle}
               type="month"
               value={period}
+              disabled={confirming}
               onChange={(e) => setPeriod(e.target.value)}
             />
           </Field>
@@ -205,22 +274,25 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
               <input
                 style={inputStyle}
                 value={assetKey}
+                disabled={confirming}
                 placeholder={type.extraField.placeholder}
                 onChange={(e) => setAsset(e.target.value)}
               />
             </Field>
           )}
 
-          <Field label="Amount (₦)">
+          <Field label="Amount (₦)" error={amountBad ? 'Enter a valid amount, e.g. 75000 or 75,000.00' : undefined}>
             <input
-              style={inputStyle}
+              style={{ ...inputStyle, borderColor: amountBad ? T.red : undefined }}
               value={amount}
+              disabled={confirming}
               placeholder="75,000"
               inputMode="decimal"
+              autoFocus
               onChange={(e) => setAmount(e.target.value)}
             />
           </Field>
-        </div>
+        </FormGrid>
 
         <Field
           label="Document title"
@@ -229,6 +301,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
           <input
             style={inputStyle}
             value={subject}
+            disabled={confirming}
             placeholder={type?.label}
             onChange={(e) => setSubject(e.target.value)}
           />
@@ -238,6 +311,7 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
           <input
             style={inputStyle}
             value={description}
+            disabled={confirming}
             placeholder={suggested}
             onChange={(e) => setDescription(e.target.value)}
           />
@@ -247,8 +321,8 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
             would let the client produce a letterheaded document without
             a vendor approving it. */}
         <div style={{
-          background: T.bg, border: `1px dashed ${T.border}`, borderRadius: 8,
-          padding: 14, marginBottom: 16, font: `14px ${FONT}`,
+          background: T.bg, border: `1px dashed ${T.border}`, borderRadius: T.radiusSm,
+          padding: 14, font: `14px ${FONT}`,
         }}>
           <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: T.textDim, textTransform: 'uppercase', marginBottom: 9 }}>
             Summary — the approving vendor issues the letterheaded document
@@ -261,18 +335,14 @@ export default function RequestForm({ feeKobo, reference, onCreated }) {
           <Row k="Processing fee" v={naira(feeKobo)} />
           <Row k="Total to transfer" v={totalKobo == null ? '—' : naira(totalKobo)} strong />
         </div>
-
-        <button type="submit" disabled={busy} style={button('primary', busy)}>
-          {busy ? 'Submitting…' : 'Submit request'}
-        </button>
       </form>
-    </Card>
+    </Modal>
   );
 }
 
 const Row = ({ k, v, strong }) => (
-  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
+  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '3px 0' }}>
     <span style={{ color: T.textDim }}>{k}</span>
-    <span style={{ fontWeight: strong ? 700 : 400 }}>{v}</span>
+    <span style={{ fontWeight: strong ? 700 : 400, textAlign: 'right' }}>{v}</span>
   </div>
 );

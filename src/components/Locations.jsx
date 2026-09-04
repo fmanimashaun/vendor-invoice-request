@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { T, FONT, input as inputStyle } from '../theme.js';
-import { Card, Field, Table, Td, Banner, button , SubTabs } from './Shell.jsx';
+import { T, FONT, MONO, input as inputStyle } from '../theme.js';
+import {
+  Card, Field, FormGrid, Table, Tr, Td, RowActions, Banner, Modal, Confirm,
+  Details, Status, PageHeader, SubTabs, button,
+} from './Shell.jsx';
 import { api, ApiError } from '../api.js';
 import Audit from './Audit.jsx';
 import Branding from './Branding.jsx';
 import { naira } from '../../shared/reference.js';
-
-const BLANK_SITE = { code: '', name: '', bu_code: '' };
-const BLANK_BU = { code: '', name: '', numbering_site: '' };
 
 /**
  * Locations and platform settings, owned by the client admin.
@@ -20,41 +20,31 @@ const BLANK_BU = { code: '', name: '', numbering_site: '' };
  * Request types are not editable here on purpose — they carry behaviour, not
  * just labels, and one added without its duplicate-guard index would have no
  * duplicate protection at all.
+ *
+ * Every panel shows what is currently true. Changing it opens a dialog.
  */
 export default function Locations({ feeKobo, orgName, logo, favicon, onSaved }) {
   const [sub, setSub]       = useState('locations');
   const [ref, setRef]       = useState(null);
-  const [site, setSite]     = useState(BLANK_SITE);
-  const [bu, setBu]         = useState(BLANK_BU);
-  const [fee, setFee]       = useState(String((feeKobo ?? 0) / 100));
-  const [org, setOrg]       = useState(orgName ?? '');
   const [fonts, setFonts]   = useState([]);
   const [ssoCfg, setSsoCfg] = useState(null);
   const [numbering, setNumbering] = useState(null);
-  const [floor, setFloor] = useState('');
-  const [sso, setSso]       = useState({ team_domain: '', aud: '', allowed_domains: '', enabled: false });
-  const [font, setFont]     = useState({ key: '', name: '', kind: 'sans', metric_of: '' });
-  const [fontFiles, setFontFiles] = useState({ regular: null, bold: null });
   const [busy, setBusy]     = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [error, setError]   = useState(null);
   const [ok, setOk]         = useState(null);
 
+  // Which dialog is open. One at a time; each is a small, complete task.
+  const [dialog, setDialog] = useState(null);   // { kind, ...payload }
+
   const load = useCallback(async () => {
     try {
       setRef(await api.reference());
       setFonts((await api.fonts()).fonts || []);
-      const num = await api.numbering();
-      setNumbering(num);
-      setFloor(String(num.seqFloor ?? 0));
-      const cfg = await api.ssoConfig();
-      setSsoCfg(cfg);
-      setSso({
-        team_domain: cfg.teamDomain || '', aud: cfg.aud || '',
-        allowed_domains: cfg.allowedDomains || '', enabled: !!cfg.enabled,
-      });
+      setNumbering(await api.numbering());
+      setSsoCfg(await api.ssoConfig());
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not load locations.');
+      setError(err instanceof ApiError ? err.message : 'Could not load settings.');
       setRef({ businessUnits: [], sites: [], buSites: {} });
     }
   }, []);
@@ -67,71 +57,16 @@ export default function Locations({ feeKobo, orgName, logo, favicon, onSaved }) 
       const msg = await fn();
       if (msg) setOk(msg);
       await load();
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Network problem. Try again.');
+      return false;
     } finally { setBusy(false); setBusyId(null); }
   }
 
-  const addSite = (e) => {
-    e.preventDefault();
-    run(async () => {
-      const { site: made } = await api.createSite(site);
-      setSite(BLANK_SITE);
-      return `${made.name} added.`;
-    });
-  };
-
-  const addBu = (e) => {
-    e.preventDefault();
-    run(async () => {
-      const { business_unit: made } = await api.createBu(bu);
-      setBu(BLANK_BU);
-      return `${made.name} added.`;
-    });
-  };
-
-  const saveFee = (e) => {
-    e.preventDefault();
-    run(async () => {
-      const kobo = Math.round(Number(fee) * 100);
-      const { config } = await api.savePlatformConfig({
-        default_fee_kobo: kobo,
-        org_name: org.trim() || undefined,
-        seq_floor: floor === '' ? undefined : Number(floor),
-      });
-      setNumbering(await api.numbering());
-      onSaved?.(config);
-      return 'Saved.';
-    });
-  };
-
-  const addFont = (e) => {
-    e.preventDefault();
-    run(async () => {
-      const form = new FormData();
-      form.set('key', font.key.trim().toLowerCase());
-      form.set('name', font.name.trim());
-      form.set('kind', font.kind);
-      if (font.metric_of.trim()) form.set('metric_of', font.metric_of.trim());
-      form.set('regular', fontFiles.regular);
-      form.set('bold', fontFiles.bold);
-      const { font: made } = await api.uploadFont(form);
-      setFont({ key: '', name: '', kind: 'sans', metric_of: '' });
-      setFontFiles({ regular: null, bold: null });
-      return `${made.name} added and available to every vendor.`;
-    });
-  };
-
-  const saveSso = (e) => {
-    e.preventDefault();
-    run(async () => {
-      const cfg = await api.saveSsoConfig(sso);
-      setSsoCfg(cfg);
-      return cfg.enabled
-        ? 'Single sign-on is on. Staff passwords keep working until someone signs in with it successfully.'
-        : 'Single sign-on is off. Staff sign in with a password.';
-    });
-  };
+  const close = () => setDialog(null);
+  /** Close the dialog, then report and reload. */
+  const finish = async (msg) => { close(); await run(async () => msg); };
 
   const sites = ref?.sites ?? [];
   const bus = ref?.businessUnits ?? [];
@@ -140,397 +75,213 @@ export default function Locations({ feeKobo, orgName, logo, favicon, onSaved }) 
 
   const PANES = {
     locations: <>
-      <Card title="Locations">
-        <Banner onClose={() => setError(null)}>{error}</Banner>
-        <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Codes are permanent — they are written onto every request and invoice.
-          Names can be changed freely. Deactivating a location hides it from the
-          request form; requests already raised against it are untouched.
-        </p>
-
+      <Card
+        title="Locations"
+        subtitle="Codes are permanent — they are written onto every request and invoice. Names can be changed freely. Deactivating hides a location from the request form; requests already raised against it are untouched."
+        right={
+          <button onClick={() => setDialog({ kind: 'site' })} style={button('primary', false, 'sm')}>
+            <span style={{ fontSize: 16, lineHeight: 0.8 }}>+</span> Add location
+          </button>
+        }
+      >
         <Table head={['Code', 'Name', 'Billed by', 'Status', '']}
                loading={!ref}
                empty={{
                  title: 'No locations yet',
-                 hint: 'Add one below. A location must exist before anyone can raise a '
-                   + 'request against it.',
+                 hint: 'A location must exist before anyone can raise a request against it.',
+                 action: <button onClick={() => setDialog({ kind: 'site' })} style={button('primary')}>Add the first location</button>,
                }}>
           {sites.map((s) => {
             const off = s.status !== 'active';
             return (
-              <tr key={s.code} style={{ opacity: off ? 0.5 : 1 }}>
+              <Tr key={s.code} dimmed={off}>
                 <Td mono>{s.code}</Td>
-                <Td>
-                  <input
-                    style={{ ...inputStyle, padding: '5px 8px' }}
-                    defaultValue={s.name}
-                    onBlur={(e) => {
-                      const name = e.target.value.trim();
-                      if (name && name !== s.name) run(() => api.updateSite(s.code, { name }), s.code);
-                    }}
-                  />
-                </Td>
+                <Td>{s.name}</Td>
                 <Td dim>{busFor(s.code).map((b) => b.code).join(', ') || '—'}</Td>
-                <Td dim>{off ? 'inactive' : 'active'}</Td>
-                <Td right>
+                <Td><Status value={off ? 'inactive' : 'active'} color={off ? T.textDim : T.green} /></Td>
+                <RowActions>
+                  <button onClick={() => setDialog({ kind: 'site', site: s })} style={button('ghost', false, 'sm')}>Edit</button>
                   <button disabled={busyId === s.code}
-                          onClick={() => run(() => api.updateSite(s.code,
-                            { name: s.name, status: off ? 'active' : 'disabled' }), s.code)}
-                          style={button('ghost', busyId === s.code)}>
+                          onClick={() => setDialog({ kind: 'toggle-site', site: s })}
+                          style={button(off ? 'ghost' : 'danger', busyId === s.code, 'sm')}>
                     {off ? 'Activate' : 'Deactivate'}
                   </button>
-                </Td>
-              </tr>
+                </RowActions>
+              </Tr>
             );
           })}
         </Table>
-
-        <form onSubmit={addSite} style={{ marginTop: 18, borderTop: `1px solid ${T.border}`, paddingTop: 18 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '0 16px' }}>
-            <Field label="Code" hint="2–8 characters. Permanent.">
-              <input style={inputStyle} value={site.code}
-                     onChange={(e) => setSite({ ...site, code: e.target.value.toUpperCase() })}
-                     placeholder="IKJ" />
-            </Field>
-            <Field label="Name">
-              <input style={inputStyle} value={site.name}
-                     onChange={(e) => setSite({ ...site, name: e.target.value })}
-                     placeholder="Ikeja Clinic" />
-            </Field>
-            <Field label="Billed by" hint="You can attach more below.">
-              <select style={inputStyle} value={site.bu_code}
-                      onChange={(e) => setSite({ ...site, bu_code: e.target.value })}>
-                <option value="">— none yet —</option>
-                {bus.map((b) => <option key={b.code} value={b.code}>{b.code} — {b.name}</option>)}
-              </select>
-            </Field>
-          </div>
-          <button type="submit" disabled={busy || !site.code || !site.name}
-                  style={button('primary', busy || !site.code || !site.name)}>
-            Add location
-          </button>
-        </form>
       </Card>
-      <Card title="Business units">
+
+      <Card
+        title="Business units"
+        subtitle="A unit groups the locations it is billed for and supplies the numbering site for unit-wide requests."
+        right={
+          <button onClick={() => setDialog({ kind: 'bu' })} style={button('primary', false, 'sm')}>
+            <span style={{ fontSize: 16, lineHeight: 0.8 }}>+</span> Add business unit
+          </button>
+        }
+      >
         <Table head={['Code', 'Name', 'Numbering site', 'Locations', 'Status', '']}
                loading={!ref}
                empty={{
                  title: 'No business units yet',
-                 hint: 'A unit groups the locations it is billed for and supplies the '
-                   + 'numbering site for unit-wide requests.',
+                 action: <button onClick={() => setDialog({ kind: 'bu' })} style={button('primary')}>Add the first unit</button>,
                }}>
           {bus.map((b) => {
             const off = b.status !== 'active';
             return (
-              <tr key={b.code} style={{ opacity: off ? 0.5 : 1 }}>
+              <Tr key={b.code} dimmed={off}>
                 <Td mono>{b.code}</Td>
-                <Td>
-                  <input
-                    style={{ ...inputStyle, padding: '5px 8px' }}
-                    defaultValue={b.name}
-                    onBlur={(e) => {
-                      const name = e.target.value.trim();
-                      if (name && name !== b.name) run(() => api.updateBu(b.code, { name }), b.code);
-                    }}
-                  />
-                </Td>
-                {/* BU-scope requests store site_code NULL and borrow this for
-                    the invoice ref, so it must always point at a real site. */}
-                <Td>
-                  <select style={{ ...inputStyle, padding: '5px 8px' }} defaultValue={b.numbering_site}
-                          onChange={(e) => run(() => api.updateBu(b.code,
-                            { name: b.name, numbering_site: e.target.value }), b.code)}>
-                    {sites.map((s) => <option key={s.code} value={s.code}>{s.code}</option>)}
-                  </select>
-                </Td>
+                <Td>{b.name}</Td>
+                <Td mono dim>{b.numbering_site}</Td>
                 <Td dim>{(buSites[b.code] || []).join(', ') || '—'}</Td>
-                <Td dim>{off ? 'inactive' : 'active'}</Td>
-                <Td right>
+                <Td><Status value={off ? 'inactive' : 'active'} color={off ? T.textDim : T.green} /></Td>
+                <RowActions>
+                  <button onClick={() => setDialog({ kind: 'bu', bu: b })} style={button('ghost', false, 'sm')}>Edit</button>
                   <button disabled={busyId === b.code}
-                          onClick={() => run(() => api.updateBu(b.code,
-                            { name: b.name, status: off ? 'active' : 'disabled' }), b.code)}
-                          style={button('ghost', busyId === b.code)}>
+                          onClick={() => setDialog({ kind: 'toggle-bu', bu: b })}
+                          style={button(off ? 'ghost' : 'danger', busyId === b.code, 'sm')}>
                     {off ? 'Activate' : 'Deactivate'}
                   </button>
-                </Td>
-              </tr>
+                </RowActions>
+              </Tr>
             );
           })}
         </Table>
-
-        <form onSubmit={addBu} style={{ marginTop: 18, borderTop: `1px solid ${T.border}`, paddingTop: 18 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '0 16px' }}>
-            <Field label="Code" hint="Permanent.">
-              <input style={inputStyle} value={bu.code}
-                     onChange={(e) => setBu({ ...bu, code: e.target.value.toUpperCase() })} />
-            </Field>
-            <Field label="Name">
-              <input style={inputStyle} value={bu.name}
-                     onChange={(e) => setBu({ ...bu, name: e.target.value })} />
-            </Field>
-            <Field label="Numbering site" hint="Used in the ref for unit-wide requests.">
-              <select style={inputStyle} value={bu.numbering_site}
-                      onChange={(e) => setBu({ ...bu, numbering_site: e.target.value })}>
-                <option value="">— pick one —</option>
-                {sites.map((s) => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
-              </select>
-            </Field>
-          </div>
-          <button type="submit" disabled={busy || !bu.code || !bu.name || !bu.numbering_site}
-                  style={button('primary', busy || !bu.code || !bu.name || !bu.numbering_site)}>
-            Add business unit
-          </button>
-        </form>
       </Card>
-      <Card title="Which locations each unit may bill for">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          A location can belong to more than one unit — Lekki is billed by both
-          RFC and Retail.
-        </p>
+
+      <Card
+        title="Which locations each unit may bill for"
+        subtitle="A location can belong to more than one unit — Lekki is billed by both RFC and Retail. Ticking applies immediately."
+      >
         <div style={{ overflowX: 'auto' }}>
           <table style={{ borderCollapse: 'collapse', font: `14px ${FONT}` }}>
             <thead>
               <tr>
-                <th style={{ padding: '8px 10px', textAlign: 'left', color: T.textDim, fontSize: 11 }} />
+                <th style={{ padding: '8px 12px', textAlign: 'left', color: T.textDim, fontSize: 11 }} />
                 {bus.map((b) => (
                   <th key={b.code} style={{
-                    padding: '8px 10px', color: T.textDim, fontSize: 11,
-                    fontWeight: 700, letterSpacing: 0.5,
+                    padding: '8px 12px', color: T.textDim, fontSize: 11,
+                    fontWeight: 700, letterSpacing: 0.5, fontFamily: MONO,
                   }}>{b.code}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {sites.map((s) => (
-                <tr key={s.code}>
-                  <Td>{s.name} <span style={{ color: T.textDim }}>({s.code})</span></Td>
+                <Tr key={s.code}>
+                  <Td>{s.name} <span style={{ color: T.textDim, fontFamily: MONO, fontSize: 12 }}>{s.code}</span></Td>
                   {bus.map((b) => {
                     const on = (buSites[b.code] || []).includes(s.code);
                     return (
-                      <td key={b.code} style={{ padding: '6px 10px', textAlign: 'center' }}>
+                      <td key={b.code} style={{ padding: '6px 12px', textAlign: 'center', borderBottom: `1px solid ${T.borderSoft}` }}>
                         <input
                           type="checkbox"
                           checked={on}
                           disabled={busy}
+                          style={{ width: 16, height: 16, cursor: 'pointer' }}
                           onChange={() => run(() => api.linkBuSite(b.code, s.code, !on))}
                         />
                       </td>
                     );
                   })}
-                </tr>
+                </Tr>
               ))}
             </tbody>
           </table>
         </div>
       </Card>
     </>,
+
     organisation: <>
-      <Branding orgName={orgName} logo={logo} favicon={favicon} onSaved={onSaved} />
-      <Card title="Organisation">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Your organisation's name, as shown in the header and printed as the
-          salutation on every invoice issued from this deployment. Nothing about
-          any particular company is built into the code — this is where it is set.
-        </p>
-        <Field label="Organisation name">
-          <input style={{ ...inputStyle, maxWidth: 360 }} value={org}
-                 onChange={(e) => setOrg(e.target.value)} placeholder="Example Group" />
-        </Field>
+      <Card
+        title="Organisation"
+        subtitle="Your organisation's name is shown in the header and printed as the salutation on every invoice issued from this deployment. The fee is a placeholder shown to requesters; the fee actually billed belongs to whichever vendor approves."
+        right={<button onClick={() => setDialog({ kind: 'org' })} style={button('ghost', false, 'sm')}>Edit</button>}
+      >
+        <Details rows={[
+          ['Organisation name', orgName],
+          ['Indicative processing fee', naira(feeKobo ?? 0)],
+        ]} />
       </Card>
-      <Card title="Indicative processing fee">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Shown on the request form so the requester sees a total. It is a
-          placeholder: the fee actually billed belongs to whichever vendor
-          approves the request, and is set by that vendor.
-        </p>
-        <form onSubmit={saveFee}>
-          <Field label="Fee (₦)" hint={`Currently ${naira(feeKobo ?? 0)}.`}>
-            <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0" step="0.01"
-                   value={fee} onChange={(e) => setFee(e.target.value)} />
-          </Field>
-          <button type="submit" disabled={busy} style={button('primary', busy)}>Save settings</button>
-        </form>
-      </Card>
+      <Branding orgName={orgName} feeKobo={feeKobo} logo={logo} favicon={favicon} onSaved={onSaved} />
     </>,
+
     invoicing: <>
-      <Card title="Invoice numbering">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 12px', lineHeight: 1.5 }}>
-          Invoice numbers must never repeat. Your approvals system already holds
-          the ones issued so far and will reject a duplicate, which blocks a
-          legitimate payment.
-        </p>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          This matters when the system is <strong style={{ color: T.text }}>rebuilt
-          somewhere else</strong> — another Cloudflare account, in-house
-          infrastructure — and the data does not come with it. A fresh
-          deployment starts at 1 and would reissue numbers you have already
-          used. Set the floor above every number ever issued and it cannot.
-        </p>
-        {numbering && (
-          <div style={{
-            border: `1px solid ${T.border}`, borderRadius: 8, padding: '9px 12px',
-            marginBottom: 14, fontSize: 13, color: T.textDim, lineHeight: 1.6,
-          }}>
-            <div>Highest sequence issued here: <strong style={{ color: T.text }}>
-              {numbering.highestSeq}</strong></div>
-            <div>Most recent invoice: <strong style={{ color: T.text }}>
-              {numbering.latestInvoiceNo || 'none yet'}</strong></div>
-            <div>Current floor: <strong style={{ color: T.text }}>
-              {numbering.seqFloor || 'none'}</strong></div>
-          </div>
-        )}
-        <Field label="Start sequences above"
-               hint="Can only be raised. Leave at 0 on a first deployment.">
-          <input style={{ ...inputStyle, maxWidth: 200 }} type="number" min="0"
-                 value={floor} onChange={(e) => setFloor(e.target.value)} />
-        </Field>
+      <Card
+        title="Invoice numbering"
+        subtitle="Invoice numbers must never repeat: your approvals system already holds the ones issued so far and rejects a duplicate, which blocks a legitimate payment. The floor matters when the system is rebuilt somewhere else without its data — set it above every number ever issued and a fresh deployment cannot reissue one."
+        right={<button onClick={() => setDialog({ kind: 'floor' })} disabled={!numbering} style={button('ghost', !numbering, 'sm')}>Raise the floor</button>}
+      >
+        <Details rows={[
+          ['Highest sequence issued here', numbering ? String(numbering.highestSeq) : 'Loading…', true],
+          ['Most recent invoice', numbering ? (numbering.latestInvoiceNo || 'none yet') : 'Loading…', true],
+          ['Current floor', numbering ? (numbering.seqFloor || 'none') : 'Loading…', true],
+        ]} />
       </Card>
-      <Card title="Fonts">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 14px', lineHeight: 1.5 }}>
-          Assigned to a vendor during onboarding so their invoice matches their
-          own stationery. Metric-compatible options have the same character
-          widths as the face they stand in for, so line breaks land where the
-          vendor's own document puts them. Everything here is self-hosted;
-          nothing is fetched from a font service when an invoice is rendered.
-        </p>
+
+      <Card
+        title="Fonts"
+        subtitle="Assigned to a vendor so their invoice matches their own stationery. Metric-compatible options have the same character widths as the face they stand in for. Everything here is self-hosted; nothing is fetched from a font service when an invoice is rendered."
+        right={
+          <button onClick={() => setDialog({ kind: 'font' })} style={button('primary', false, 'sm')}>
+            <span style={{ fontSize: 16, lineHeight: 0.8 }}>+</span> Upload a font
+          </button>
+        }
+      >
         <Table head={['Font', 'Stands in for', 'Kind', 'Source', '']}
                empty={{
                  title: 'No fonts loaded',
-                 hint: 'Run scripts/fetch-fonts.mjs to pull the bundled catalogue, or '
-                   + 'upload one below.',
+                 hint: 'Run scripts/fetch-fonts.mjs to pull the bundled catalogue, or upload one.',
                }}>
           {fonts.map((f) => (
-            <tr key={f.key}>
-              <Td>{f.name} <span style={{ color: T.textDim }}>({f.key})</span></Td>
+            <Tr key={f.key}>
+              <Td>{f.name} <span style={{ color: T.textDim, fontFamily: MONO, fontSize: 12 }}>{f.key}</span></Td>
               <Td dim>{f.metricOf || '—'}</Td>
               <Td dim>{f.kind}</Td>
               <Td dim>{f.builtin ? 'bundled' : 'uploaded'}</Td>
-              <Td right>
+              <RowActions>
                 {!f.builtin && (
                   <button disabled={busyId === f.key}
-                          onClick={() => run(async () => {
-                            await api.deleteFont(f.key);
-                            setFonts((await api.fonts()).fonts || []);
-                            return `${f.name} removed.`;
-                          }, f.key)}
-                          style={button('ghost', busyId === f.key)}>Remove</button>
+                          onClick={() => setDialog({ kind: 'remove-font', font: f })}
+                          style={button('danger', busyId === f.key, 'sm')}>Remove</button>
                 )}
-              </Td>
-            </tr>
+              </RowActions>
+            </Tr>
           ))}
         </Table>
-
-        <form onSubmit={addFont} style={{ marginTop: 18, borderTop: `1px solid ${T.border}`, paddingTop: 18 }}>
-          <h3 style={{ margin: '0 0 6px', font: `600 14px ${FONT}`, color: T.text }}>
-            Upload a font
-          </h3>
-          <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
-            For stationery the bundled list does not cover. Both weights are
-            required, and each is checked for the characters an invoice needs —
-            a font without the ₦ sign is rejected here, because at render time
-            it would drop the symbol silently rather than fail.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '0 16px' }}>
-            <Field label="Key" hint="Lowercase. Permanent.">
-              <input style={inputStyle} value={font.key}
-                     onChange={(e) => setFont({ ...font, key: e.target.value })} placeholder="housesans" />
-            </Field>
-            <Field label="Name">
-              <input style={inputStyle} value={font.name}
-                     onChange={(e) => setFont({ ...font, name: e.target.value })} placeholder="House Sans" />
-            </Field>
-            <Field label="Kind">
-              <select style={inputStyle} value={font.kind}
-                      onChange={(e) => setFont({ ...font, kind: e.target.value })}>
-                <option value="sans">Sans</option>
-                <option value="serif">Serif</option>
-                <option value="mono">Mono</option>
-              </select>
-            </Field>
-            <Field label="Stands in for" hint="Optional, e.g. Garamond.">
-              <input style={inputStyle} value={font.metric_of}
-                     onChange={(e) => setFont({ ...font, metric_of: e.target.value })} />
-            </Field>
-            <Field label="Regular (.ttf)">
-              <input style={inputStyle} type="file" accept=".ttf,.otf"
-                     onChange={(e) => setFontFiles({ ...fontFiles, regular: e.target.files?.[0] || null })} />
-            </Field>
-            <Field label="Bold (.ttf)">
-              <input style={inputStyle} type="file" accept=".ttf,.otf"
-                     onChange={(e) => setFontFiles({ ...fontFiles, bold: e.target.files?.[0] || null })} />
-            </Field>
-          </div>
-          <button type="submit"
-                  disabled={busy || !font.key || !font.name || !fontFiles.regular || !fontFiles.bold}
-                  style={button('primary', busy || !font.key || !font.name || !fontFiles.regular || !fontFiles.bold)}>
-            Upload font
-          </button>
-        </form>
       </Card>
     </>,
+
     audit: <Audit />,
+
     signin: <>
-      <Card title="Staff single sign-on">
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 6px', lineHeight: 1.5 }}>
-          Optional. Until it is set up, your staff sign in with a password.
-          Vendors always use a password — they are not in your directory — so
-          this only ever affects your own people.
-        </p>
-        <p style={{ color: T.textDim, fontSize: 13, margin: '0 0 16px', lineHeight: 1.5 }}>
-          Switching it on does <strong style={{ color: T.text }}>not</strong> cut
-          passwords off straight away. That happens automatically the first time
-          somebody actually completes a sign-on, so a wrong setting cannot lock
-          you out of your own admin.
-        </p>
-
+      <Card
+        title="Staff single sign-on"
+        subtitle="Optional. Until it is set up, your staff sign in with a password. Vendors always use a password — they are not in your directory — so this only ever affects your own people. Switching it on does not cut passwords off straight away; that happens the first time somebody actually completes a sign-on, so a wrong setting cannot lock you out."
+        right={<button onClick={() => setDialog({ kind: 'sso' })} disabled={!ssoCfg} style={button('ghost', !ssoCfg, 'sm')}>Edit sign-on settings</button>}
+      >
         {ssoCfg && (
-          <div style={{
-            border: `1px solid ${T.border}`, borderRadius: 8, padding: '10px 13px',
-            marginBottom: 16, fontSize: 13, color: T.textDim, lineHeight: 1.6,
-          }}>
-            <div>Single sign-on: <strong style={{ color: ssoCfg.enabled ? T.green : T.textDim }}>
-              {ssoCfg.enabled ? 'on' : 'off'}</strong></div>
-            <div>Proven to work: <strong style={{ color: ssoCfg.verified ? T.green : T.amber }}>
-              {ssoCfg.verified ? `yes, ${ssoCfg.verifiedAt}` : 'not yet'}</strong></div>
-            <div>Staff password sign-in: <strong style={{ color: ssoCfg.clientPassword ? T.amber : T.green }}>
-              {ssoCfg.clientPassword ? 'still available' : 'disabled'}</strong></div>
-          </div>
+          <Details rows={[
+            ['Single sign-on', <Status value={ssoCfg.enabled ? 'on' : 'off'} color={ssoCfg.enabled ? T.green : T.textDim} />],
+            ['Proven to work', <Status value={ssoCfg.verified ? `yes · ${ssoCfg.verifiedAt}` : 'not yet'} color={ssoCfg.verified ? T.green : T.amber} />],
+            ['Staff password sign-in', <Status value={ssoCfg.clientPassword ? 'still available' : 'disabled'} color={ssoCfg.clientPassword ? T.amber : T.green} />],
+            ['Team domain', ssoCfg.teamDomain, true],
+            ['Application AUD', ssoCfg.aud, true],
+            ['Allowed email domains', ssoCfg.allowedDomains, true],
+          ]} />
         )}
-
-        <form onSubmit={saveSso}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: '0 16px' }}>
-            <Field label="Team domain" hint="From Cloudflare Zero Trust.">
-              <input style={inputStyle} value={sso.team_domain}
-                     onChange={(e) => setSso({ ...sso, team_domain: e.target.value })}
-                     placeholder="yourteam.cloudflareaccess.com" />
-            </Field>
-            <Field label="Application AUD tag" hint="From the Access application.">
-              <input style={inputStyle} value={sso.aud}
-                     onChange={(e) => setSso({ ...sso, aud: e.target.value })} />
-            </Field>
-            <Field label="Allowed email domains"
-                   hint="Comma separated. Only these get an account on first sign-in.">
-              <input style={inputStyle} value={sso.allowed_domains}
-                     onChange={(e) => setSso({ ...sso, allowed_domains: e.target.value })}
-                     placeholder="yourcompany.com" />
-            </Field>
-          </div>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 16px', fontSize: 14 }}>
-            <input type="checkbox" checked={sso.enabled}
-                   onChange={(e) => setSso({ ...sso, enabled: e.target.checked })} />
-            Offer single sign-on on the login screen
-          </label>
-          <button type="submit" disabled={busy} style={button('primary', busy)}>
-            Save sign-on settings
-          </button>
-        </form>
       </Card>
     </>,
   };
 
   return (
     <>
+      <PageHeader
+        title="Settings"
+        description="Locations, the organisation's own details, invoice numbering and fonts, sign-in, and the audit trail."
+      />
       <SubTabs
         tabs={[
           ['locations', 'Locations & units'],
@@ -542,7 +293,381 @@ export default function Locations({ feeKobo, orgName, logo, favicon, onSaved }) 
         active={sub}
         onChange={setSub}
       />
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <Banner kind="ok" onClose={() => setOk(null)}>{ok}</Banner>
       {PANES[sub]}
+
+      {dialog?.kind === 'site' && (
+        <SiteModal site={dialog.site} bus={bus} onClose={close}
+                   onSaved={(name) => finish(`${name} ${dialog.site ? 'updated' : 'added'}.`)} />
+      )}
+      {dialog?.kind === 'bu' && (
+        <BuModal bu={dialog.bu} sites={sites} onClose={close}
+                 onSaved={(name) => finish(`${name} ${dialog.bu ? 'updated' : 'added'}.`)} />
+      )}
+      {dialog?.kind === 'toggle-site' && (
+        <Confirm
+          title={dialog.site.status === 'active' ? `Deactivate ${dialog.site.name}?` : `Activate ${dialog.site.name}?`}
+          confirmLabel={dialog.site.status === 'active' ? 'Deactivate' : 'Activate'}
+          kind={dialog.site.status === 'active' ? 'danger' : 'primary'}
+          busy={busy}
+          onClose={close}
+          onConfirm={async () => {
+            const s = dialog.site;
+            const next = s.status === 'active' ? 'disabled' : 'active';
+            const done = await run(() => api.updateSite(s.code, { name: s.name, status: next })
+              .then(() => `${s.name} ${next === 'active' ? 'activated' : 'deactivated'}.`), s.code);
+            if (done) close();
+          }}
+        >
+          {dialog.site.status === 'active'
+            ? <>It disappears from the request form. Requests already raised against it are untouched, and it can be activated again later.</>
+            : <>It becomes available on the request form again.</>}
+        </Confirm>
+      )}
+      {dialog?.kind === 'toggle-bu' && (
+        <Confirm
+          title={dialog.bu.status === 'active' ? `Deactivate ${dialog.bu.name}?` : `Activate ${dialog.bu.name}?`}
+          confirmLabel={dialog.bu.status === 'active' ? 'Deactivate' : 'Activate'}
+          kind={dialog.bu.status === 'active' ? 'danger' : 'primary'}
+          busy={busy}
+          onClose={close}
+          onConfirm={async () => {
+            const b = dialog.bu;
+            const next = b.status === 'active' ? 'disabled' : 'active';
+            const done = await run(() => api.updateBu(b.code, { name: b.name, status: next })
+              .then(() => `${b.name} ${next === 'active' ? 'activated' : 'deactivated'}.`), b.code);
+            if (done) close();
+          }}
+        >
+          {dialog.bu.status === 'active'
+            ? <>Nobody can raise a request for this unit until it is activated again. Existing requests are untouched.</>
+            : <>Requests can be raised for this unit again.</>}
+        </Confirm>
+      )}
+      {dialog?.kind === 'org' && (
+        <OrgModal orgName={orgName} feeKobo={feeKobo} onClose={close}
+                  onSaved={async (cfg) => { onSaved?.(cfg); await finish('Saved.'); }} />
+      )}
+      {dialog?.kind === 'floor' && numbering && (
+        <FloorModal numbering={numbering} feeKobo={feeKobo} onClose={close}
+                    onSaved={async (cfg) => { onSaved?.(cfg); await finish('Floor raised.'); }} />
+      )}
+      {dialog?.kind === 'font' && (
+        <FontModal onClose={close} onSaved={(name) => finish(`${name} added and available to every vendor.`)} />
+      )}
+      {dialog?.kind === 'remove-font' && (
+        <Confirm
+          title={`Remove ${dialog.font.name}?`}
+          confirmLabel="Remove font"
+          kind="danger"
+          busy={busy}
+          onClose={close}
+          onConfirm={async () => {
+            const f = dialog.font;
+            const done = await run(async () => { await api.deleteFont(f.key); return `${f.name} removed.`; }, f.key);
+            if (done) close();
+          }}
+        >
+          It is deleted from storage. A font a vendor is still using cannot be
+          removed — change their layout first.
+        </Confirm>
+      )}
+      {dialog?.kind === 'sso' && ssoCfg && (
+        <SsoModal cfg={ssoCfg} onClose={close}
+                  onSaved={(cfg) => finish(cfg.enabled
+                    ? 'Single sign-on is on. Staff passwords keep working until someone signs in with it successfully.'
+                    : 'Single sign-on is off. Staff sign in with a password.')} />
+      )}
     </>
+  );
+}
+
+/** Shared shape for the small edit dialogs: form, busy flag, error banner. */
+function useSubmit(fn) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const submit = async (e) => {
+    e?.preventDefault();
+    setError(null); setBusy(true);
+    try { await fn(); }
+    catch (err) { setError(err instanceof ApiError ? err.message : 'Network problem. Try again.'); setBusy(false); }
+  };
+  return { busy, error, setError, submit };
+}
+
+function SiteModal({ site, bus, onClose, onSaved }) {
+  const editing = !!site;
+  const [form, setForm] = useState({ code: site?.code ?? '', name: site?.name ?? '', bu_code: '' });
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    if (editing) await api.updateSite(site.code, { name: form.name.trim() });
+    else await api.createSite({ ...form, code: form.code.trim(), name: form.name.trim() });
+    await onSaved(form.name.trim());
+  });
+  const ready = form.name.trim() && (editing || form.code.trim());
+
+  return (
+    <Modal title={editing ? `Edit ${site.name}` : 'Add a location'} onClose={onClose} size="sm" locked={busy}
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="site-form" disabled={busy || !ready} style={button('primary', busy || !ready)}>
+            {busy ? 'Saving…' : editing ? 'Save' : 'Add location'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="site-form" onSubmit={submit}>
+        <Field label="Code" hint={editing ? 'Permanent — it is written onto every request and invoice.' : '2–8 characters. Permanent once saved.'}>
+          <input style={{ ...inputStyle, fontFamily: MONO }} value={form.code} disabled={editing} autoFocus={!editing}
+                 onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
+                 placeholder="IKJ" />
+        </Field>
+        <Field label="Name">
+          <input style={inputStyle} value={form.name} autoFocus={editing}
+                 onChange={(e) => setForm({ ...form, name: e.target.value })}
+                 placeholder="Ikeja Clinic" />
+        </Field>
+        {!editing && (
+          <Field label="Billed by" hint="You can attach more units afterwards from the matrix." style={{ marginBottom: 0 }}>
+            <select style={inputStyle} value={form.bu_code}
+                    onChange={(e) => setForm({ ...form, bu_code: e.target.value })}>
+              <option value="">— none yet —</option>
+              {bus.map((b) => <option key={b.code} value={b.code}>{b.code} — {b.name}</option>)}
+            </select>
+          </Field>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
+function BuModal({ bu, sites, onClose, onSaved }) {
+  const editing = !!bu;
+  const [form, setForm] = useState({ code: bu?.code ?? '', name: bu?.name ?? '', numbering_site: bu?.numbering_site ?? '' });
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    if (editing) await api.updateBu(bu.code, { name: form.name.trim(), numbering_site: form.numbering_site });
+    else await api.createBu({ ...form, code: form.code.trim(), name: form.name.trim() });
+    await onSaved(form.name.trim());
+  });
+  const ready = form.name.trim() && form.numbering_site && (editing || form.code.trim());
+
+  return (
+    <Modal title={editing ? `Edit ${bu.name}` : 'Add a business unit'} onClose={onClose} size="sm" locked={busy}
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="bu-form" disabled={busy || !ready} style={button('primary', busy || !ready)}>
+            {busy ? 'Saving…' : editing ? 'Save' : 'Add business unit'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="bu-form" onSubmit={submit}>
+        <Field label="Code" hint="Permanent.">
+          <input style={{ ...inputStyle, fontFamily: MONO }} value={form.code} disabled={editing} autoFocus={!editing}
+                 onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} placeholder="RFC" />
+        </Field>
+        <Field label="Name">
+          <input style={inputStyle} value={form.name} autoFocus={editing}
+                 onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </Field>
+        {/* BU-scope requests store site_code NULL and borrow this for the
+            invoice ref, so it must always point at a real site. */}
+        <Field label="Numbering site" hint="Used in the invoice reference for unit-wide requests." style={{ marginBottom: 0 }}>
+          <select style={inputStyle} value={form.numbering_site}
+                  onChange={(e) => setForm({ ...form, numbering_site: e.target.value })}>
+            <option value="">— pick one —</option>
+            {sites.map((s) => <option key={s.code} value={s.code}>{s.code} — {s.name}</option>)}
+          </select>
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+
+function OrgModal({ orgName, feeKobo, onClose, onSaved }) {
+  const [org, setOrg] = useState(orgName ?? '');
+  const [fee, setFee] = useState(String((feeKobo ?? 0) / 100));
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    const { config } = await api.savePlatformConfig({
+      default_fee_kobo: Math.round(Number(fee) * 100),
+      org_name: org.trim() || undefined,
+    });
+    await onSaved(config);
+  });
+  const ready = org.trim() && fee !== '' && Number(fee) >= 0;
+
+  return (
+    <Modal title="Organisation" onClose={onClose} size="sm" locked={busy}
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="org-form" disabled={busy || !ready} style={button('primary', busy || !ready)}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="org-form" onSubmit={submit}>
+        <Field label="Organisation name" hint="Header and invoice salutation.">
+          <input style={inputStyle} value={org} autoFocus onChange={(e) => setOrg(e.target.value)} placeholder="Example Group" />
+        </Field>
+        <Field label="Indicative processing fee (₦)" hint="Shown to requesters so they see a total. The fee actually billed is the approving vendor's." style={{ marginBottom: 0 }}>
+          <input style={inputStyle} type="number" min="0" step="0.01" value={fee} onChange={(e) => setFee(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+
+function FloorModal({ numbering, feeKobo, onClose, onSaved }) {
+  const [floor, setFloor] = useState(String(numbering.seqFloor ?? 0));
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    const { config } = await api.savePlatformConfig({
+      default_fee_kobo: feeKobo ?? 0,
+      seq_floor: Number(floor),
+    });
+    await onSaved(config);
+  });
+  const n = Number(floor);
+  const ready = floor !== '' && Number.isInteger(n) && n >= (numbering.seqFloor ?? 0);
+
+  return (
+    <Modal title="Raise the sequence floor" onClose={onClose} size="sm" locked={busy}
+      subtitle="Can only be raised. Leave at 0 on a first deployment."
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="floor-form" disabled={busy || !ready} style={button('primary', busy || !ready)}>
+            {busy ? 'Saving…' : 'Set floor'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="floor-form" onSubmit={submit}>
+        <Field label="Start sequences above"
+               hint={`Highest issued here: ${numbering.highestSeq}. Current floor: ${numbering.seqFloor || 'none'}.`}
+               error={floor !== '' && n < (numbering.seqFloor ?? 0) ? 'The floor can only be raised.' : undefined}
+               style={{ marginBottom: 0 }}>
+          <input style={{ ...inputStyle, fontFamily: MONO }} type="number" min={numbering.seqFloor ?? 0} autoFocus
+                 value={floor} onChange={(e) => setFloor(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+
+function FontModal({ onClose, onSaved }) {
+  const [font, setFont] = useState({ key: '', name: '', kind: 'sans', metric_of: '' });
+  const [files, setFiles] = useState({ regular: null, bold: null });
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    const form = new FormData();
+    form.set('key', font.key.trim().toLowerCase());
+    form.set('name', font.name.trim());
+    form.set('kind', font.kind);
+    if (font.metric_of.trim()) form.set('metric_of', font.metric_of.trim());
+    form.set('regular', files.regular);
+    form.set('bold', files.bold);
+    const { font: made } = await api.uploadFont(form);
+    await onSaved(made.name);
+  });
+  const ready = font.key.trim() && font.name.trim() && files.regular && files.bold;
+
+  return (
+    <Modal title="Upload a font" onClose={onClose} locked={busy}
+      subtitle="For stationery the bundled list does not cover. Both weights are required, and each is checked for the characters an invoice needs — a font without the ₦ sign is rejected here, because at render time it would drop the symbol silently rather than fail."
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="font-form" disabled={busy || !ready} style={button('primary', busy || !ready)}>
+            {busy ? 'Checking and uploading…' : 'Upload font'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="font-form" onSubmit={submit}>
+        <FormGrid>
+          <Field label="Key" hint="Lowercase. Permanent.">
+            <input style={{ ...inputStyle, fontFamily: MONO }} value={font.key} autoFocus
+                   onChange={(e) => setFont({ ...font, key: e.target.value })} placeholder="housesans" />
+          </Field>
+          <Field label="Name">
+            <input style={inputStyle} value={font.name}
+                   onChange={(e) => setFont({ ...font, name: e.target.value })} placeholder="House Sans" />
+          </Field>
+          <Field label="Kind">
+            <select style={inputStyle} value={font.kind}
+                    onChange={(e) => setFont({ ...font, kind: e.target.value })}>
+              <option value="sans">Sans</option>
+              <option value="serif">Serif</option>
+              <option value="mono">Mono</option>
+            </select>
+          </Field>
+          <Field label="Stands in for" hint="Optional, e.g. Garamond.">
+            <input style={inputStyle} value={font.metric_of}
+                   onChange={(e) => setFont({ ...font, metric_of: e.target.value })} />
+          </Field>
+          <Field label="Regular (.ttf)">
+            <input style={inputStyle} type="file" accept=".ttf,.otf"
+                   onChange={(e) => setFiles({ ...files, regular: e.target.files?.[0] || null })} />
+          </Field>
+          <Field label="Bold (.ttf)">
+            <input style={inputStyle} type="file" accept=".ttf,.otf"
+                   onChange={(e) => setFiles({ ...files, bold: e.target.files?.[0] || null })} />
+          </Field>
+        </FormGrid>
+      </form>
+    </Modal>
+  );
+}
+
+function SsoModal({ cfg, onClose, onSaved }) {
+  const [sso, setSso] = useState({
+    team_domain: cfg.teamDomain || '', aud: cfg.aud || '',
+    allowed_domains: cfg.allowedDomains || '', enabled: !!cfg.enabled,
+  });
+  const { busy, error, setError, submit } = useSubmit(async () => {
+    const saved = await api.saveSsoConfig(sso);
+    await onSaved(saved);
+  });
+
+  return (
+    <Modal title="Staff single sign-on" onClose={onClose} locked={busy}
+      subtitle="Cloudflare Access in front of the staff sign-in. Vendors are unaffected."
+      actions={
+        <>
+          <button onClick={onClose} disabled={busy} style={button('ghost', busy)}>Cancel</button>
+          <button type="submit" form="sso-form" disabled={busy} style={button('primary', busy)}>
+            {busy ? 'Saving…' : 'Save sign-on settings'}
+          </button>
+        </>
+      }>
+      <Banner onClose={() => setError(null)}>{error}</Banner>
+      <form id="sso-form" onSubmit={submit}>
+        <FormGrid min={230}>
+          <Field label="Team domain" hint="From Cloudflare Zero Trust.">
+            <input style={inputStyle} value={sso.team_domain} autoFocus
+                   onChange={(e) => setSso({ ...sso, team_domain: e.target.value })}
+                   placeholder="yourteam.cloudflareaccess.com" />
+          </Field>
+          <Field label="Application AUD tag" hint="From the Access application.">
+            <input style={{ ...inputStyle, fontFamily: MONO }} value={sso.aud}
+                   onChange={(e) => setSso({ ...sso, aud: e.target.value })} />
+          </Field>
+        </FormGrid>
+        <Field label="Allowed email domains"
+               hint="Comma separated, matched exactly. Only these get an account on first sign-in; list subdomains separately.">
+          <input style={inputStyle} value={sso.allowed_domains}
+                 onChange={(e) => setSso({ ...sso, allowed_domains: e.target.value })}
+                 placeholder="yourcompany.com, mail.yourcompany.com" />
+        </Field>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 14 }}>
+          <input type="checkbox" checked={sso.enabled}
+                 onChange={(e) => setSso({ ...sso, enabled: e.target.checked })} />
+          Offer single sign-on on the login screen
+        </label>
+      </form>
+    </Modal>
   );
 }

@@ -39,7 +39,12 @@ export const api = {
   createRequest: (payload)      => call('/requests', { method: 'POST', body: payload }),
   withdraw:    (id)             => call(`/requests/${id}/withdraw`, { method: 'POST' }),
   approve:     (id)             => call(`/requests/${id}/approve`, { method: 'POST' }),
-  reject:      (id, reason)     => call(`/requests/${id}/reject`, { method: 'POST', body: { reason } }),
+  claim:       (id)             => call(`/requests/${id}/claim`, { method: 'POST' }),
+  // Sent back to be fixed. Stays with the vendor that returned it.
+  returnRequest: (id, reason)   => call(`/requests/${id}/return`, { method: 'POST', body: { reason } }),
+  // Terminal. Nobody else gets a turn.
+  decline:     (id, reason)     => call(`/requests/${id}/decline`, { method: 'POST', body: { reason } }),
+  revise:      (id, patch)      => call(`/requests/${id}`, { method: 'PUT', body: patch }),
 
   invoices:    ()               => call('/invoices'),
   saveConfig:  (cfg)            => call('/config', { method: 'PUT', body: cfg }),

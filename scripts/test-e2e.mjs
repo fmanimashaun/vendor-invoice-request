@@ -178,6 +178,17 @@ async function call(who, path, { method = 'GET', body } = {}) {
 }
 
 /** Give a user a session without going through Access. */
+/**
+ * Approving now requires a claim first, so the tests that predate the claim
+ * model use this. It is not a shortcut for the app: `claim` and `approve` are
+ * separate acts precisely so exactly one vendor is ever accountable, and the
+ * lifecycle section below exercises them apart.
+ */
+const claimAndApprove = async (who, id) => {
+  await call(who, `/api/requests/${id}/claim`, { method: 'POST' });
+  return call(who, `/api/requests/${id}/approve`, { method: 'POST' });
+};
+
 async function sessionFor(who, email) {
   const { signSession, sessionCookie } = await import('../worker/auth.js');
   const row = DB.db.prepare('SELECT id FROM users WHERE email = ?').get(email);
@@ -374,10 +385,10 @@ check('Retail staff data for the same month allowed', r.status === 201);
 
 results.push('\nApproval and numbering');
 
-r = await call('rel', `/api/requests/${routerReqId}/approve`, { method: 'POST' });
+r = await claimAndApprove('rel', routerReqId);
 check('The client cannot approve', r.status === 403, `got ${r.status}`);
 
-r = await call('victor', `/api/requests/${routerReqId}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', routerReqId);
 check('vendor approval issues an invoice', r.status === 201, JSON.stringify(r.data));
 const EPOCH = DB.db.prepare('SELECT instance_epoch e FROM config WHERE id = 1').get().e;
 const refFor = (seq) => `${EPOCH}-${String(seq).padStart(5, '0')}`;
@@ -388,10 +399,10 @@ check('the number is ten characters', r.data?.invoice_no?.length === 10,
 check('download name flattens slashes', r.data?.download === `${EPOCH}-00001.pdf`, r.data?.download);
 const routerInvoice = r.data?.invoice_no;
 
-r = await call('victor', `/api/requests/${routerReqId}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', routerReqId);
 check('double approval blocked', r.status === 409, `got ${r.status}`);
 
-r = await call('victor', `/api/requests/${staffReqId}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', staffReqId);
 check('a BU-scope request is numbered from the same global sequence',
   /^[0-9A-Z]+-\d{5}$/.test(r.data?.invoice_no || ''), r.data?.invoice_no);
 
@@ -399,14 +410,14 @@ check('a BU-scope request is numbered from the same global sequence',
 const surElec = DB.db.prepare(
   `SELECT id FROM requests WHERE type_code='ELEC' AND site_code='SUR' AND status='pending'`,
 ).get();
-r = await call('victor', `/api/requests/${surElec.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', surElec.id);
 check('a different site does NOT restart the count',
   r.data?.invoice_no !== refFor(1), r.data?.invoice_no);
 
 const rexStaff = DB.db.prepare(
   `SELECT id FROM requests WHERE bu_code='REX' AND status='pending'`,
 ).get();
-r = await call('victor', `/api/requests/${rexStaff.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', rexStaff.id);
 check('a different business unit shares the sequence too',
   /^[0-9A-Z]+-\d{5}$/.test(r.data?.invoice_no || ''), r.data?.invoice_no);
 
@@ -414,7 +425,7 @@ check('a different business unit shares the sequence too',
 const gbg2 = DB.db.prepare(
   `SELECT id FROM requests WHERE asset_key='08099999999' AND status='pending'`,
 ).get();
-r = await call('victor', `/api/requests/${gbg2.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', gbg2.id);
 check('the sequence increments', Number(r.data?.invoice_no?.split('-')[1]) > 1,
   r.data?.invoice_no);
 
@@ -426,17 +437,25 @@ r = await call('rel', '/api/requests', {
 });
 const ajaId = r.data?.request?.id;
 
-r = await call('victor', `/api/requests/${ajaId}/reject`, { method: 'POST', body: {} });
-check('rejection requires a reason', r.status === 400);
+// Declining is now the end of a claim, so it takes two steps.
+r = await call('victor', `/api/requests/${ajaId}/decline`, { method: 'POST', body: { reason: 'no' } });
+check('an unclaimed request cannot be declined',
+  r.status === 409 && r.data?.error === 'not_claimed', JSON.stringify(r.data));
 
-r = await call('victor', `/api/requests/${ajaId}/reject`, { method: 'POST', body: { reason: 'Amount does not match the bill' } });
-check('rejection recorded', r.status === 200);
+r = await call('victor', `/api/requests/${ajaId}/claim`, { method: 'POST' });
+check('claiming it works', r.status === 200, JSON.stringify(r.data)?.slice(0, 120));
+
+r = await call('victor', `/api/requests/${ajaId}/decline`, { method: 'POST', body: {} });
+check('declining requires a reason', r.status === 400, JSON.stringify(r.data));
+
+r = await call('victor', `/api/requests/${ajaId}/decline`, { method: 'POST', body: { reason: 'Amount does not match the bill' } });
+check('decline recorded', r.status === 200, JSON.stringify(r.data));
 
 r = await call('rel', '/api/requests', {
   method: 'POST',
   body: { bu_code: 'RFC', site_code: 'AJA', type_code: 'ELEC', asset_key: '04521187733', period: '2026-09', amount_kobo: 4800000, description: 'Electricity Bill For Ajah Clinic' },
 });
-check('corrected resubmission after rejection allowed', r.status === 201, JSON.stringify(r.data));
+check('corrected resubmission after a decline is allowed', r.status === 201, JSON.stringify(r.data));
 
 check('rejected request burned no invoice number',
   DB.db.prepare('SELECT COUNT(*) c FROM invoices').get().c === 5,
@@ -478,7 +497,7 @@ check('and no flag is recorded',
   (r.data?.request?.ack_flags || []).length === 0, JSON.stringify(r.data?.request?.ack_flags));
 const ogbaFirst = r.data?.request?.id;
 
-r = await call('victor', `/api/requests/${ogbaFirst}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', ogbaFirst);
 check('approving it establishes the baseline', r.status === 201, JSON.stringify(r.data));
 
 // 10x the last approved amount for the same site and type.
@@ -540,7 +559,7 @@ const selfReq = DB.db.prepare(
   `SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1`).get();
 DB.db.prepare('UPDATE requests SET created_by = (SELECT id FROM users WHERE email=?) WHERE id = ?')
   .run('approver@alpha.example', selfReq.id);
-r = await call('victor', `/api/requests/${selfReq.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', selfReq.id);
 check('cannot approve a request you raised', r.status === 403, JSON.stringify(r.data));
 
 results.push('\nPDF');
@@ -613,7 +632,7 @@ check('the issuing vendor still sees its own approved work',
 // one gets approved changes the approved history other assertions depend on.
 const openReq = DB.db.prepare(
   "SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1").get();
-r = await call('rival', `/api/requests/${openReq.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('rival', openReq.id);
 check('a rival vendor can approve from the shared queue', r.status === 201, JSON.stringify(r.data));
 
 const takenInvoice = DB.db.prepare('SELECT * FROM invoices WHERE request_id = ?').get(openReq.id);
@@ -629,7 +648,7 @@ check('the number carries this deployment stamp and nothing vendor-specific',
   takenInvoice.invoice_no.startsWith(`${EPOCH}-`) && takenInvoice.invoice_no.length === 10,
   takenInvoice.invoice_no);
 
-r = await call('victor', `/api/requests/${openReq.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', openReq.id);
 check('a second vendor cannot approve what is already taken', r.status === 409, JSON.stringify(r.data));
 
 const afterTake = await call('victor', '/api/requests');
@@ -642,7 +661,7 @@ DB.db.prepare("UPDATE vendors SET status='disabled' WHERE id=2").run();
 const stillPending = DB.db.prepare(
   "SELECT id FROM requests WHERE status='pending' ORDER BY id LIMIT 1").get();
 if (stillPending) {
-  r = await call('rival', `/api/requests/${stillPending.id}/approve`, { method: 'POST' });
+  r = await claimAndApprove('rival', stillPending.id);
   check('a suspended vendor cannot approve', r.status === 403, JSON.stringify(r.data));
 }
 r = await call('rival', `/api/invoices/${encodeURIComponent(takenInvoice.invoice_no)}/pdf`);
@@ -757,7 +776,7 @@ r = await call('rel', '/api/requests', { method: 'POST', body: {
 const taxedReq = r.data?.request?.id;
 check('a request is raised for the taxed vendor to take', r.status === 201, JSON.stringify(r.data));
 
-r = await call('taxed', `/api/requests/${taxedReq}/approve`, { method: 'POST' });
+r = await claimAndApprove('taxed', taxedReq);
 check('the taxed vendor approves it', r.status === 201, JSON.stringify(r.data));
 
 // base = 1,000,000 + 10,000 = 1,010,000 kobo. VAT 7.5% = 75,750. WHT 5% = 50,500.
@@ -1226,7 +1245,7 @@ check('an epoch is stable within the hour it was claimed',
        fee_kobo, amount_kobo, total_kobo, created_by)
      VALUES ('REQ-EPOCH2', 'REX', 'LEK', 'ELEC', '2026-06', '04577777777', 'A', 'Lagos.',
              'S', 'N', 'D', 10000, 500000, 510000, 4) RETURNING id`).get();
-  r = await call('victor', `/api/requests/${anotherReq.id}/approve`, { method: 'POST' });
+  r = await claimAndApprove('victor', anotherReq.id);
   check('a later invoice reuses the same epoch, not a new one',
     r.status === 201 && r.data.invoice_no.startsWith(`${before}-`),
     `${r.data?.invoice_no} should carry ${before}`);
@@ -1264,7 +1283,7 @@ const reqAfter = DB.db.prepare(
            10000, 500000, 510000, 4) RETURNING id`,
 ).get(scope.bu_code, scope.site_code, scope.period);
 
-r = await call('victor', `/api/requests/${reqAfter.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', reqAfter.id);
 check('an invoice can still be issued after the rebuild', r.status === 201, JSON.stringify(r.data));
 const reissued = DB.db.prepare('SELECT seq FROM invoices WHERE request_id = ?')
   .get(reqAfter.id)?.seq;
@@ -1291,7 +1310,7 @@ const reqDegraded = DB.db.prepare(
      fee_kobo, amount_kobo, total_kobo, created_by)
    VALUES ('REQ-KVDOWN', 'REX', 'LEK', 'ELEC', '2026-07', '04588888888', 'A', 'Lagos.', 'S', 'N', 'D',
            10000, 500000, 510000, 4) RETURNING id`).get();
-r = await call('victor', `/api/requests/${reqDegraded.id}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', reqDegraded.id);
 check('an invoice still issues when the mark cannot be read', r.status === 201,
   JSON.stringify(r.data));
 kv.get = realGet;
@@ -1642,7 +1661,7 @@ check('and its total uses that indicative fee',
   r.data?.request?.total_kobo === 5010000, String(r.data?.request?.total_kobo));
 
 const rhmoId = r.data?.request?.id;
-r = await call('victor', `/api/requests/${rhmoId}/approve`, { method: 'POST' });
+r = await claimAndApprove('victor', rhmoId);
 
 const rhmoInvoice = DB.db.prepare('SELECT * FROM invoices WHERE request_id = ?').get(rhmoId);
 check('the approving vendor\'s fee is what actually gets billed',
@@ -1682,10 +1701,15 @@ await call('reladmin', '/api/auth/context', { method: 'POST', body: { role: 'adm
 r = await call('victor', '/api/requests');
 const vendorRows = r.data.requests;
 check('a vendor sees rows', vendorRows.length > 0);
-check('a vendor sees only the open queue plus its own decided work',
-  vendorRows.every((x) => x.status === 'pending'
-    || x.decided_vendor_name === 'Alpha Services Ltd'),
-  JSON.stringify(vendorRows.map((x) => `${x.request_ref}:${x.status}:${x.decided_vendor_name}`)));
+// Scoped by the CLAIM, not the decision: a claim removes a request from every
+// other vendor's sight immediately, and a vendor must be able to see its own
+// in-progress work before it has been decided.
+const alphaId2 = DB.db.prepare("SELECT id FROM vendors WHERE code='alpha'").get().id;
+check('a vendor sees the open queue plus everything it has claimed, and nothing else',
+  vendorRows.every((x) => x.status === 'pending' || x.claimed_vendor_id === alphaId2),
+  JSON.stringify(vendorRows
+    .filter((x) => x.status !== 'pending' && x.claimed_vendor_id !== alphaId2)
+    .map((x) => `${x.request_ref}:${x.status}:${x.claimed_vendor_id}`)));
 
 results.push('\nSign-in methods and the SSO cutover');
 
@@ -1834,7 +1858,7 @@ const trail = r.data?.entries ?? [];
 check('it recorded something', trail.length > 0, `${trail.length} entries`);
 
 const actions = new Set(trail.map((e) => e.action));
-for (const a of ['REQUEST_RAISED', 'INVOICE_ISSUED', 'REQUEST_REJECTED',
+for (const a of ['REQUEST_RAISED', 'INVOICE_ISSUED', 'REQUEST_DECLINED',
                  'VENDOR_ONBOARDED', 'BANK_DETAILS_CHANGED', 'PASSWORD_RESET_BY_ADMIN']) {
   check(`${a} is recorded`, actions.has(a), [...actions].join(','));
 }
@@ -1898,6 +1922,213 @@ check('a range with nothing in it returns nothing, not everything',
 check('the action list is offered for the filter UI',
   Array.isArray(r.data?.actions) && r.data.actions.length > 0,
   JSON.stringify(r.data?.actions));
+
+// == A claim is one-way ================================================
+//
+// A request in the shared queue is visible to every vendor. Claiming it takes
+// it out of everyone else's queue permanently: it cannot be released, no other
+// vendor can take it, and it has to end with the claiming vendor as approved
+// or declined. Sending it back to the requester to fix keeps it there too.
+//
+// The point is accountability. A request that can bounce between vendors has
+// nobody answerable for it, and a requester chasing an approval needs one name
+// to chase.
+
+const mkReq = async (over = {}) => {
+  const r2 = await call('rel', '/api/requests', { method: 'POST', body: {
+    bu_code: 'RFC', site_code: 'LEK', type_code: 'ROUTER', period: '2026-10',
+    amount_kobo: 250000, asset_key: `0800${Math.floor(Math.random() * 1e7)}`,
+    description: 'Claim lifecycle fixture', ...over } });
+  if (r2.status !== 201) throw new Error('fixture failed: ' + JSON.stringify(r2.data));
+  return r2.data.request;
+};
+
+let cr = await mkReq();
+check('a new request starts unclaimed', cr.status === 'pending', cr.status);
+
+// Both vendors can see it while it is unclaimed.
+r = await call('victor', '/api/requests?status=pending');
+check('every vendor sees the open queue',
+  r.data.requests.some((x) => x.id === cr.id), 'alpha cannot see it');
+r = await call('rival', '/api/requests?status=pending');
+check('including a second vendor',
+  r.data.requests.some((x) => x.id === cr.id), 'northwind cannot see it');
+
+// Approving without claiming is refused: a claim is what makes exactly one
+// vendor accountable, so it cannot be skipped.
+r = await call('victor', `/api/requests/${cr.id}/approve`, { method: 'POST' });
+check('it cannot be approved before it is claimed',
+  r.status === 409 && /Claim this request/.test(r.data?.message || ''), JSON.stringify(r.data));
+r = await call('victor', `/api/requests/${cr.id}/decline`, { method: 'POST',
+  body: { reason: 'no thanks' } });
+check('nor declined before it is claimed',
+  r.status === 409 && r.data?.error === 'not_claimed', JSON.stringify(r.data));
+
+r = await call('victor', `/api/requests/${cr.id}/claim`, { method: 'POST' });
+check('a vendor can claim it', r.status === 200, JSON.stringify(r.data)?.slice(0, 140));
+check('and the claim is recorded against them',
+  r.data?.request?.status === 'claimed' && !!r.data?.request?.claimed_at,
+  JSON.stringify(r.data?.request?.status));
+
+// THE ASSERTION. It is gone from everyone else, for good.
+r = await call('rival', '/api/requests');
+check('the other vendor can no longer see it AT ALL',
+  !r.data.requests.some((x) => x.id === cr.id),
+  'northwind can still see a claimed request');
+r = await call('rival', `/api/requests/${cr.id}/claim`, { method: 'POST' });
+check('and cannot claim it', r.status === 409, JSON.stringify(r.data));
+check('being told who took it', /took this one first/.test(r.data?.message || ''), r.data?.message);
+r = await call('rival', `/api/requests/${cr.id}/approve`, { method: 'POST' });
+check('nor approve it — 404, so it does not learn the request exists',
+  r.status === 404, JSON.stringify(r.data));
+r = await call('rival', `/api/requests/${cr.id}/decline`, { method: 'POST',
+  body: { reason: 'not ours to decline' } });
+check('nor decline it', r.status === 404, JSON.stringify(r.data));
+
+// There is no way to put it back.
+for (const path of ['unclaim', 'release', 'reject']) {
+  r = await call('victor', `/api/requests/${cr.id}/${path}`, { method: 'POST' });
+  check(`there is no /${path} route — a claim cannot be handed back`,
+    r.status === 404, String(r.status));
+}
+check('the claiming vendor still holds it',
+  DB.db.prepare('SELECT status FROM requests WHERE id = ?').get(cr.id).status === 'claimed',
+  'status moved');
+
+// Sending it back keeps it with the same vendor.
+r = await call('victor', `/api/requests/${cr.id}/return`, { method: 'POST', body: { reason: 'x' } });
+check('a one-word reason is not enough to send it back', r.status === 400, JSON.stringify(r.data));
+r = await call('victor', `/api/requests/${cr.id}/return`, { method: 'POST',
+  body: { reason: 'Meter reading does not match the bill' } });
+check('it can be sent back to the requester', r.status === 200, JSON.stringify(r.data));
+const returned = DB.db.prepare('SELECT * FROM requests WHERE id = ?').get(cr.id);
+check('the status says returned', returned.status === 'returned', returned.status);
+check('the reason is stored for the requester to read',
+  /Meter reading/.test(returned.return_reason || ''), returned.return_reason);
+check('and it is STILL scoped to the vendor that returned it',
+  returned.claimed_vendor_id === DB.db.prepare("SELECT id FROM vendors WHERE code='alpha'").get().id,
+  String(returned.claimed_vendor_id));
+
+r = await call('rival', '/api/requests');
+check('a returned request does not go back to the shared queue',
+  !r.data.requests.some((x) => x.id === cr.id), 'northwind can see a returned request');
+
+// Only the requester can fix it, and only the fields that do not change what
+// the request IS.
+r = await call('victor', `/api/requests/${cr.id}`, { method: 'PUT', body: { amount_kobo: 1 } });
+check('a vendor cannot edit the request', r.status === 403, String(r.status));
+// A second client member, so "not yours" is tested against a real identity
+// rather than an absent session. Created here rather than borrowed from
+// another section: a fixture that depends on the order of unrelated tests
+// breaks the moment one is moved.
+r = await call('reladmin', '/api/users', { method: 'POST', body: {
+  org: 'client', full_name: 'Second Requester', email: 'second@client.example',
+  roles: ['member'], password: 'a-second-good-passphrase',
+  // Not the subject of this test, and the forced-change gate would close
+  // every route and turn the 404 we are checking for into a 403.
+  must_change_password: false } });
+check('a second requester exists to test against', r.status === 201,
+  JSON.stringify(r.data)?.slice(0, 140));
+await sessionFor('other', 'second@client.example');
+r = await call('other', `/api/requests/${cr.id}`, { method: 'PUT', body: { amount_kobo: 1 } });
+check('nor can a different requester', r.status === 404, String(r.status));
+
+r = await call('rel', `/api/requests/${cr.id}`, { method: 'PUT', body: {
+  amount_kobo: 260000, description: 'Corrected against the bill',
+  asset_key: returned.asset_key,
+  // These must be ignored rather than obeyed: they decide the invoice
+  // reference and the duplicate guard, so honouring them would let one
+  // request quietly become a different one while keeping its number.
+  bu_code: 'RHMO', site_code: 'GBG', period: '2026-08', type_code: 'ELEC' } });
+check('the requester can fix it', r.status === 200, JSON.stringify(r.data)?.slice(0, 160));
+const fixed = r.data?.request;
+check('the amount changed', fixed?.amount_kobo === 260000, String(fixed?.amount_kobo));
+check('the total was recomputed', fixed?.total_kobo === 260000 + fixed.fee_kobo,
+  `${fixed?.total_kobo} vs ${260000 + fixed?.fee_kobo}`);
+check('the unit, site, period and type are UNCHANGED',
+  fixed?.bu_code === 'RFC' && fixed?.site_code === 'LEK'
+  && fixed?.period === '2026-10' && fixed?.type_code === 'ROUTER',
+  JSON.stringify([fixed?.bu_code, fixed?.site_code, fixed?.period, fixed?.type_code]));
+check('it goes straight back to the same vendor, not the queue',
+  fixed?.status === 'claimed'
+  && fixed?.claimed_vendor_id === returned.claimed_vendor_id, fixed?.status);
+check('and the return reason is cleared', !fixed?.return_reason, fixed?.return_reason);
+
+r = await call('rel', `/api/requests/${cr.id}`, { method: 'PUT', body: { amount_kobo: 1000 } });
+check('a claimed request cannot be edited — only withdrawn',
+  r.status === 409 && /withdraw it, but not edit/.test(r.data?.message || ''),
+  JSON.stringify(r.data));
+
+// Declining ends it for everybody.
+r = await call('victor', `/api/requests/${cr.id}/decline`, { method: 'POST',
+  body: { reason: 'Site is outside our coverage' } });
+check('the holder can decline it', r.status === 200, JSON.stringify(r.data));
+const declined = DB.db.prepare('SELECT * FROM requests WHERE id = ?').get(cr.id);
+check('the status is declined, not rejected', declined.status === 'declined', declined.status);
+check('the reason is kept', /coverage/.test(declined.decline_reason || ''), declined.decline_reason);
+r = await call('rival', '/api/requests');
+check('a declined request does NOT return to the shared queue',
+  !r.data.requests.some((x) => x.id === cr.id), 'northwind sees a declined request');
+r = await call('victor', `/api/requests/${cr.id}/approve`, { method: 'POST' });
+check('and it cannot be approved afterwards', r.status === 409, JSON.stringify(r.data?.message));
+
+// Declining frees the period, so the requester can raise a replacement.
+const replacement = await mkReq({ asset_key: declined.asset_key });
+check('the period is free again after a decline',
+  replacement.status === 'pending', replacement.status);
+r = await call('victor', `/api/requests/${replacement.id}/claim`, { method: 'POST' });
+r = await call('victor', `/api/requests/${replacement.id}/approve`, { method: 'POST' });
+check('a claimed request can be approved and issues an invoice',
+  r.status === 201 && !!r.data?.invoice_no, JSON.stringify(r.data));
+
+// A live claim still blocks a duplicate: the guards cover claimed and returned.
+const dupBase = await mkReq({ asset_key: '08099887766' });
+await call('victor', `/api/requests/${dupBase.id}/claim`, { method: 'POST' });
+r = await call('rel', '/api/requests', { method: 'POST', body: {
+  bu_code: 'RFC', site_code: 'LEK', type_code: 'ROUTER', period: '2026-10',
+  amount_kobo: dupBase.amount_kobo, asset_key: '08099887766',
+  description: 'Same thing again' } });
+check('a request claimed by a vendor still blocks an exact duplicate',
+  r.status === 409 && r.data?.error === 'duplicate_period', JSON.stringify(r.data));
+await call('victor', `/api/requests/${dupBase.id}/return`, { method: 'POST',
+  body: { reason: 'checking the duplicate guard covers returned too' } });
+r = await call('rel', '/api/requests', { method: 'POST', body: {
+  bu_code: 'RFC', site_code: 'LEK', type_code: 'ROUTER', period: '2026-10',
+  amount_kobo: dupBase.amount_kobo, asset_key: '08099887766',
+  description: 'Same thing again' } });
+check('so does one sitting with the requester to be fixed',
+  r.status === 409 && r.data?.error === 'duplicate_period', JSON.stringify(r.data));
+
+// The requester's escape hatch. Without it, a vendor that claims something and
+// goes quiet freezes the request with nobody able to act.
+const stuck = await mkReq({ asset_key: '08055443322' });
+await call('victor', `/api/requests/${stuck.id}/claim`, { method: 'POST' });
+r = await call('rel', `/api/requests/${stuck.id}/withdraw`, { method: 'POST' });
+check('the requester can withdraw a request a vendor is sitting on',
+  r.status === 200, JSON.stringify(r.data));
+check('and it ends rather than returning to the queue',
+  DB.db.prepare('SELECT status FROM requests WHERE id = ?').get(stuck.id).status === 'withdrawn',
+  'not withdrawn');
+r = await call('other', `/api/requests/${(await mkReq({ asset_key: '08011223344' })).id}/withdraw`,
+  { method: 'POST' });
+check('but not someone else\'s request', r.status === 409, JSON.stringify(r.data));
+
+// Every step is in the trail: this is the record of why a payment happened,
+// or did not.
+r = await call('reladmin', '/api/audit');
+const acts = new Set(r.data.entries.map((e) => e.action));
+for (const a of ['REQUEST_CLAIMED', 'REQUEST_RETURNED', 'REQUEST_REVISED',
+                 'REQUEST_DECLINED', 'REQUEST_WITHDRAWN']) {
+  check(`${a} is recorded`, acts.has(a), [...acts].join(','));
+}
+check('a decline is recorded as terminal',
+  r.data.entries.some((e) => e.action === 'REQUEST_DECLINED'
+    && /must raise a new one/.test(e.summary || '')),
+  'the summary does not say it is terminal');
+check('and a withdrawal from under a vendor says so',
+  r.data.entries.some((e) => e.action === 'REQUEST_WITHDRAWN'
+    && /while a vendor was holding it/.test(e.summary || '')),
+  'the summary does not mention the claim');
 
 // == Branding is configuration, not a build artifact ===================
 //
@@ -2040,7 +2271,7 @@ r = await call('rel', '/api/requests', { method: 'POST', body: {
   description: 'Layout snapshot check' } });
 check('a fresh request is raised', r.status === 201, JSON.stringify(r.data)?.slice(0, 150));
 const freshReqId = r.data?.request?.id;
-r = await call('regen', `/api/requests/${freshReqId}/approve`, { method: 'POST' });
+r = await claimAndApprove('regen', freshReqId);
 check('and approved by the same vendor', r.status === 201, JSON.stringify(r.data));
 const freshTpl = DB.db.prepare(
   'SELECT template_json FROM invoices WHERE request_id = ?').get(freshReqId);
@@ -2179,6 +2410,130 @@ check('and it records whether a change was required',
   r.data.entries.some((e) => /NOT required/.test(e.summary || ''))
   && r.data.entries.some((e) => /must change/.test(e.summary || '')),
   JSON.stringify(r.data.entries.map((e) => e.summary).slice(0, 4)));
+
+// == First sign-in, for EVERY kind of account ==========================
+//
+// The app boots by calling /api/bootstrap and then /api/requests. For a locked
+// account the second call is a 403, and until the client learnt to stop after
+// bootstrap that 403 was shown as a fatal error with a Try again button that
+// reloaded into the same 403 -- the password form never rendered, and there
+// was no way out. The suite has no DOM, so what it CAN pin down is the server
+// contract that sequence depends on, for each org and role rather than one:
+//
+//   bootstrap 200 and says mustChangePassword     (the form can render)
+//   every other route 403 password_change_required (never a 500, never a 401
+//                                                   that would bounce them to
+//                                                   the login screen)
+//   /api/auth/password with the current one   200
+//   bootstrap no longer says mustChangePassword
+//   /api/requests 200                              (the app opens)
+//
+// Covers a brand-new account and an admin reset of an existing one, since
+// both put the account in the same state.
+results.push('\nFirst sign-in, every kind of account');
+
+const sweepVendorId = DB.db.prepare("SELECT id FROM vendors WHERE code = 'alpha'").get().id;
+const FIRST_LOGIN_CASES = [
+  { who: 'fl-member', label: 'client member', body: {
+      org: 'client', full_name: 'First Member', email: 'first.member@client.example',
+      roles: ['member'] } },
+  { who: 'fl-admin', label: 'client admin', body: {
+      org: 'client', full_name: 'First Admin', email: 'first.admin@client.example',
+      roles: ['admin'] } },
+  { who: 'fl-both', label: 'client member+admin', body: {
+      org: 'client', full_name: 'First Both', email: 'first.both@client.example',
+      roles: ['member', 'admin'] } },
+  { who: 'fl-rep', label: 'vendor approver', body: {
+      org: 'vendor', vendor_id: sweepVendorId, full_name: 'First Rep',
+      email: 'first.rep@alpha.example', roles: ['approver'],
+      job_title: 'Analyst', phone: '+234 800 000 0001' } },
+];
+
+// The routes a locked account must NOT be able to use, including the one the
+// boot sequence used to call and swallow (auth/context).
+const LOCKED_PROBES = [
+  ['/api/requests', 'GET'],
+  ['/api/requests?status=pending', 'GET'],
+  ['/api/auth/context', 'POST', { role: 'admin' }],
+  ['/api/users', 'GET'],
+  ['/api/vendors', 'GET'],
+  ['/api/audit', 'GET'],
+];
+
+async function walkFirstLogin(who, label, email, tempPassword) {
+  r = await call(who, '/api/auth/login', { method: 'POST', body: { email, password: tempPassword } });
+  check(`${label}: signs in with the password the admin set`, r.status === 200, JSON.stringify(r.data));
+
+  r = await call(who, '/api/bootstrap');
+  check(`${label}: bootstrap is open while locked`, r.status === 200, String(r.status));
+  check(`${label}: and says the password must change`,
+    r.data?.mustChangePassword === true, JSON.stringify(r.data?.mustChangePassword));
+  check(`${label}: and carries the hint the form shows`,
+    typeof r.data?.passwordHint === 'string' && r.data.passwordHint.length > 0, 'no hint');
+  r = await call(who, '/api/me');
+  check(`${label}: /api/me is open too`, r.status === 200, String(r.status));
+
+  for (const [path, method, body] of LOCKED_PROBES) {
+    r = await call(who, path, { method, body });
+    check(`${label}: ${method} ${path} is 403 password_change_required while locked`,
+      r.status === 403 && r.data?.error === 'password_change_required',
+      `${r.status} ${JSON.stringify(r.data?.error)}`);
+  }
+
+  const chosen = `${who}-chose-a-long-passphrase`;
+  r = await call(who, '/api/auth/password', { method: 'POST', body: {
+    current_password: 'definitely-not-it', password: chosen } });
+  check(`${label}: wrong current password refused`, r.status === 401, String(r.status));
+  r = await call(who, '/api/auth/password', { method: 'POST', body: {
+    current_password: tempPassword, password: 'short' } });
+  check(`${label}: a weak new password refused with the reason the form shows`,
+    r.status === 422 && r.data?.error === 'weak_password' && typeof r.data?.message === 'string',
+    `${r.status} ${JSON.stringify(r.data?.error)}`);
+  r = await call(who, '/api/auth/password', { method: 'POST', body: {
+    current_password: tempPassword, password: chosen } });
+  check(`${label}: changes it with the right current password`, r.status === 200, JSON.stringify(r.data));
+
+  // This is the sequence `enter()` runs after the form submits.
+  r = await call(who, '/api/bootstrap');
+  check(`${label}: bootstrap no longer asks for a change`,
+    r.status === 200 && r.data?.mustChangePassword === false, JSON.stringify(r.data?.mustChangePassword));
+  r = await call(who, '/api/requests');
+  check(`${label}: and the app opens`, r.status === 200, String(r.status));
+
+  // The old password is dead, the new one works, on a fresh session.
+  r = await call(`${who}-again`, '/api/auth/login', { method: 'POST', body: { email, password: tempPassword } });
+  check(`${label}: the admin's password no longer signs in`, r.status === 401, String(r.status));
+  r = await call(`${who}-again`, '/api/auth/login', { method: 'POST', body: { email, password: chosen } });
+  check(`${label}: their own does`, r.status === 200, String(r.status));
+  r = await call(`${who}-again`, '/api/requests');
+  check(`${label}: straight into the app on the next sign-in`, r.status === 200, String(r.status));
+  return chosen;
+}
+
+for (const c of FIRST_LOGIN_CASES) {
+  const temp = `${c.who}-temporary-passphrase`;
+  r = await call('reladmin', '/api/users', { method: 'POST', body: { ...c.body, password: temp } });
+  check(`${c.label}: account created`, r.status === 201, JSON.stringify(r.data));
+  await walkFirstLogin(c.who, c.label, c.body.email, temp);
+}
+
+// An admin reset puts an EXISTING account through the same door. Do it for a
+// client member and a vendor rep, the two rosters SetPassword.jsx serves.
+for (const c of FIRST_LOGIN_CASES.filter((x) => x.who === 'fl-member' || x.who === 'fl-rep')) {
+  const id = DB.db.prepare('SELECT id FROM users WHERE email = ?').get(c.body.email).id;
+  const temp = `${c.who}-reset-by-the-admin`;
+  r = await call('reladmin', `/api/users/${id}/password`, { method: 'POST', body: { password: temp } });
+  check(`${c.label} after admin reset: reset accepted and requires a change`,
+    r.status === 200 && r.data?.mustChange === true, JSON.stringify(r.data));
+  // The session they already hold is locked too -- not just the next one.
+  r = await call(c.who, '/api/requests');
+  check(`${c.label} after admin reset: the live session is locked at once`,
+    r.status === 403 && r.data?.error === 'password_change_required', `${r.status} ${JSON.stringify(r.data?.error)}`);
+  r = await call(c.who, '/api/bootstrap');
+  check(`${c.label} after admin reset: and bootstrap tells the app so`,
+    r.status === 200 && r.data?.mustChangePassword === true, JSON.stringify(r.data?.mustChangePassword));
+  await walkFirstLogin(`${c.who}-reset`, `${c.label} after admin reset`, c.body.email, temp);
+}
 
 // == The audit trail cannot be edited ==================================
 //
