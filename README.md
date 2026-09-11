@@ -529,17 +529,69 @@ To disable someone: `UPDATE users SET status='disabled' WHERE email='…';`
 ### Invoice numbering
 
 ```
-BU / SITE / YYYY / MON / NNN        RFC/GBG/2026/SEP/001
+EEEE-NNNNN        198Y-00006
 ```
 
-Counter scope is **(business unit, site, period)**, so Lekki Clinic and RFC
-Surulere have independent sequences. Numbers are assigned **at approval**, never
-at request time — otherwise a rejected request burns a number and leaves a gap
-in the issued sequence.
+Ten characters, two fields. The downstream approvals system caps how long an
+invoice number may be, which is the whole reason for the shape: ten characters
+cannot also spell out business unit, site and period and still be unique. Those
+are not lost — they are printed on the face of the document and stored on the
+`invoices` row, which is where anyone actually reads them.
 
-The ref is a derived display string; `period` is a separate sortable column.
-Year sits before month so a plain text sort in Excel comes out chronological.
-Download filenames flatten the slashes: `RFC-GBG-2026-SEP-001.pdf`.
+**`EEEE` — the deployment stamp.** Whole hours since 1 January 2020 UTC, in
+base 36, uppercased (`shared/reference.js`, `instanceEpoch`):
+
+```js
+Math.floor(Date.now() / 3600000 - Date.UTC(2020, 0, 1) / 3600000)
+  .toString(36).toUpperCase()
+```
+
+So `198Y` is 58,642 hours, meaning that deployment issued its first invoice at
+2026-09-09 10:00 UTC. It is computed once, when the deployment issues its first
+invoice, and then stays fixed — every later number carries the same four
+characters. It is **not** the invoice's own date; the document prints that
+separately.
+
+Its job is collision avoidance without a lookup. Two deployments set up more
+than an hour apart can never produce the same stamp, so a rebuild on fresh
+infrastructure cannot reissue a number the old one already gave out — even with
+no access to the old database. That matters because the approvals system
+rejects a number it already holds, and a rejected number is a blocked payment.
+Four characters lasts until 2211.
+
+**`NNNNN` — the sequence.** One global counter, zero-padded to five: `00006` is
+the sixth invoice this deployment has issued. Not one sequence per site, per
+business unit or per vendor — a single run of numbers is easier to check for
+gaps than thirty, and gaps are the point. A sequence lets an auditor see that
+`00003` is missing and ask why; a timestamp has no gaps because every value is
+arbitrary, which throws away the property the numbering exists for. 99,999
+invoices per deployment.
+
+The next sequence is the highest of three floors, each covering a failure the
+others cannot:
+
+| Floor | Where it lives | Survives |
+|---|---|---|
+| `MAX(seq)` over `invoices` | D1 | authoritative while the database is intact |
+| the `seq/global` watermark | KV | D1 being dropped or restored |
+| `config.seq_floor` | D1 config | a rebuild on other infrastructure where neither store comes along |
+
+The point of spreading them is that a number already issued is already in the
+approvals system, and that system rejects a repeat — so a counter that walks
+backwards blocks payment. **If you ever restore D1 from a backup, do not clear
+the KV keys.** `seq_floor` is the one you set by hand, once, when moving the
+deployment somewhere neither store follows: set it above every number ever
+issued. `0` means no floor, which is right for a first deployment.
+
+Numbers are assigned **at approval**, never at request time: otherwise a
+rejected request burns a number and leaves a gap in an issued sequence, which is
+exactly the thing an auditor asks about.
+
+The number is the same whichever vendor takes the request — it is the client's
+reference, not the vendor's, so `vendor_id` is deliberately not part of the
+counter scope. The ref is a derived display string; `period` is its own sortable
+column, so never sort or range-query on the ref text. Download filenames are the
+number plus `.pdf`: `198Y-00006.pdf`.
 
 ### Duplicate prevention
 

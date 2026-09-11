@@ -339,7 +339,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_dup_staffdc
 -- columns here and printed on the document. See shared/reference.js.
 CREATE TABLE IF NOT EXISTS invoices (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  invoice_no  TEXT NOT NULL UNIQUE,            -- RFC/GBG/2026/SEP/001
+  invoice_no  TEXT NOT NULL UNIQUE,            -- 198Y-00006
   request_id  INTEGER NOT NULL UNIQUE REFERENCES requests(id),
   vendor_id   INTEGER NOT NULL REFERENCES vendors(id),
 
