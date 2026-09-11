@@ -562,6 +562,14 @@ DB.db.prepare('UPDATE requests SET created_by = (SELECT id FROM users WHERE emai
 r = await claimAndApprove('victor', selfReq.id);
 check('cannot approve a request you raised', r.status === 403, JSON.stringify(r.data));
 
+/** The /Title string, which pdf-lib writes as UTF-16BE hex in the Info dict. */
+function pdfTitle(bytes) {
+  const m = /\/Title <FEFF([0-9A-Fa-f]+)>/.exec(
+    Buffer.from(bytes).toString('latin1'));
+  if (!m) return null;
+  return m[1].match(/.{4}/g).map(h => String.fromCharCode(parseInt(h, 16))).join('');
+}
+
 results.push('\nPDF');
 
 r = await call('rel', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
@@ -570,6 +578,15 @@ check('The client cannot pull the letterhead PDF', r.status === 403, `status=${r
 r = await call('victor', `/api/invoices/${encodeURIComponent(routerInvoice)}/pdf`);
 check('PDF renders', r.status === 200 && r.data?.length > 20000, `status=${r.status} bytes=${r.data?.length}`);
 check('PDF magic bytes', new TextDecoder().decode(r.data.slice(0, 5)) === '%PDF-');
+// The document itself must carry the WHOLE number, not the bare sequence.
+// The renderer draws 'Ref:' and sets the PDF title from one value, so the
+// title is a faithful proxy for the line a reader sees -- and unlike the page
+// text, which is written as subset glyph ids, it is readable from the bytes.
+// The bug this pins: the PDF route passed seq but not invoice_no, so the file
+// arrived called '19AL-00006.pdf' with 'Ref: 00006' printed inside it.
+check('the printed ref is the full stored invoice number, not just the sequence',
+  pdfTitle(r.data) === routerInvoice, `${pdfTitle(r.data)} vs ${routerInvoice}`);
+
 check('Content-Disposition uses the flat filename',
   (r.headers.get('Content-Disposition') || '').includes(`${EPOCH}-`)
     && (r.headers.get('Content-Disposition') || '').endsWith('.pdf"'),
