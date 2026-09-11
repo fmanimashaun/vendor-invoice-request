@@ -113,29 +113,55 @@ person who actually approved it, not themselves. `approver_name`, `approver_titl
 ## Numbering
 
 ```
-BU / SITE / YYYY / MON / NNN        RFC/GBG/2026/SEP/001
+EEEE-NNNNN        198Y-00006
 ```
 
-- Counter scope is **(bu_code, resolved site, period)**. All three request types
-  share one counter within that scope and interleave.
-- The number is **global, not per-vendor**: it is built from the client's own
-  reference, so a request carries the same number whichever vendor serves it.
-  Do not add `vendor_id` to the counter scope.
+Ten characters, because **the downstream approvals system limits the length**.
+That cap is the whole reason for the shape: ten characters cannot also spell
+out business unit, site and period and stay unique. The number therefore
+encodes **no scope at all** — not vendor, unit, site or period. Those are
+columns on `invoices` and printed on the document, which is where anyone reads
+them. An earlier scheme was `RFC/GBG/2026/SEP/001`; if you find that spelling
+still in a comment, it is drift, not a second format.
+
+- **`EEEE` — the deployment stamp.** Whole hours since 2020-01-01 UTC in base
+  36, uppercased (`instanceEpoch`). Claimed on the **first issue** into
+  `config.instance_epoch` and never written again: every number this deployment
+  produces carries it, so changing it later orphans everything already issued.
+  Two deployments set up more than an hour apart cannot collide, so a rebuild
+  elsewhere cannot reissue an old number *without consulting the old database*.
+  Never hand-edit it and never copy it into a new deployment — either
+  reintroduces the collision it exists to prevent.
+- **`NNNNN` — one global sequence.** Not per site, per BU or per vendor;
+  `UNIQUE (seq)` on `invoices` enforces that. All three request types share it
+  and interleave. Gap detection is one run of numbers to check rather than
+  thirty, and 003 missing is still 003 missing.
+- The number is **global, not per-vendor**: a request carries the same number
+  whichever vendor serves it. Do not add `vendor_id` to the counter scope.
 - For BU-scope types (`STAFFDC`) `requests.site_code` is **NULL** and the BU's
-  `numberingSite` supplies the ref segment. Storing the fallback site as if it
-  were real would put all of RFC's staff-data spend on Lekki in any per-site
-  report.
+  `numberingSite` resolves the site written onto the invoice row. Storing the
+  fallback site on the request as if it were real would put all of RFC's
+  staff-data spend on Lekki in any per-site report.
 - **The counter must never go backwards, and D1 alone cannot guarantee that.**
   `seq` comes from `MAX(seq)` over `invoices`; empty that table and the counter
-  restarts. Re-issuing `RFC/GBG/2026/SEP/001` after a mid-month rebuild is not
-  untidy, it is **rejected by the downstream approvals system**, which already
-  holds that number — and a legitimate payment is blocked.
+  restarts. Re-issuing `198Y-00006` after a rebuild is not untidy, it is
+  **rejected by the downstream approvals system**, which already holds that
+  number — and a legitimate payment is blocked.
 
-  So a per-scope high-water mark lives in **KV**, a different store from D1: a
-  dropped or restored database does not take it with it. It is a floor, never
-  an authority — D1 remains the source of truth while intact, the UNIQUE
-  indexes are still what prevent duplicates, and a KV failure logs
-  `SEQ_WATERMARK_READ_FAILED` and carries on rather than blocking issuance.
+  So the next sequence is the highest of **three floors**, each covering a
+  failure the others cannot:
+
+  | Floor | Store | Survives |
+  |---|---|---|
+  | `MAX(seq)` | D1 | authoritative while the database is intact |
+  | `seq/global` watermark | KV | D1 being dropped or restored |
+  | `config.seq_floor` | D1 config | a rebuild on other infrastructure where neither store comes along |
+
+  The watermark is a single global key, matching the single global sequence.
+  It is a floor, never an authority — D1 remains the source of truth while
+  intact, the UNIQUE indexes are still what prevent duplicates, and a KV
+  failure logs `SEQ_WATERMARK_READ_FAILED` and carries on rather than blocking
+  issuance. `seq_floor` is set by hand, once, during such a migration.
 
   Keeping the sequence rather than switching to a timestamp is deliberate: a
   sequence lets an auditor see that 003 is missing. A timestamp has no gaps
@@ -144,10 +170,15 @@ BU / SITE / YYYY / MON / NNN        RFC/GBG/2026/SEP/001
 
   If you ever restore D1 from a backup, do **not** clear those KV keys.
 
+- **The renderer must be given `invoice_no`, not just `seq`.** It falls back to
+  `invoiceRef(inv)`, which without an `epoch` returns the bare padded sequence
+  — so the document prints `Ref: 00006` while the file it arrives in is called
+  `198Y-00006.pdf`. That shipped once. There is a test on the PDF title, which
+  the renderer sets from the same value as the `Ref:` line.
 - The ref is a **derived display string**. `period` is its own sortable column;
   never sort or range-query on the ref text.
-- Year before month so a plain text sort in Excel comes out chronological.
-- `downloadName()` flattens the slashes — they are path separators.
+- `downloadName()` still strips slashes. Nothing it is given contains one any
+  more; it is there for refs stored under the old scheme.
 - `request_ref` (`REQ-000412`) is a separate, gap-tolerant sequence.
 
 ## Duplicate guards — the highest-value control

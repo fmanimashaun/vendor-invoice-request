@@ -1398,6 +1398,9 @@ async function previewVendorTemplate(request, env, me, id) {
   // Fixed specimen content. Chosen to exercise the layout: a long-ish
   // description, an extra column, and figures wide enough to show alignment.
   const bytes = await renderInvoice({
+    // A specimen ref of the real shape, so the column width shown is the one
+    // an issued document will actually use.
+    invoice_no: invoiceRef({ seq: 1, epoch: instanceEpoch() }),
     bu_code: 'SPEC', site_code: 'MAIN', period: '2026-01', seq: 1,
     addressee: 'Specimen Branch',
     addressee_loc: 'Lagos.',
@@ -2165,8 +2168,8 @@ async function approveRequest(env, me, id) {
     // The counter must never go backwards, even if `invoices` is emptied.
     //
     // A number that has been issued is already in the downstream approvals
-    // system, which rejects a repeat — so re-issuing RFC/GBG/2026/SEP/001
-    // after a mid-month rebuild does not just look untidy, it blocks payment.
+    // system, which rejects a repeat — so re-issuing 198Y-00006 after a
+    // rebuild does not just look untidy, it blocks payment.
     //
     // The high-water mark therefore lives in KV, a different store from D1: a
     // dropped or restored database does not take it with it. D1 remains the
@@ -2299,6 +2302,10 @@ async function invoicePdf(env, me, invoiceNo) {
                                   merged.artwork, merged.type.family);
 
   const bytes = await renderInvoice({
+    // The stored number, whole. Without it the renderer falls back to the bare
+    // sequence and the document says 'Ref: 00006' while the file it arrives in
+    // is called 198Y-00006.pdf -- the approvals system holds the long form.
+    invoice_no: row.invoice_no,
     bu_code: row.bu_code,
     site_code: row.site_code,
     period: row.period,
